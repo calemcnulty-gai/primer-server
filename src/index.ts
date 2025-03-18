@@ -71,7 +71,7 @@ export const createServer = (port: number = Number(process.env.PORT) || 3000) =>
   // Validate API keys on startup
   validateApiKeys();
   
-  return app.listen(port, () => {
+  return app.listen(port, '0.0.0.0', () => {
     console.log(`🚀 Server running at http://localhost:${port}`);
     console.log(`📚 API Documentation available at http://localhost:${port}/api-docs`);
   });

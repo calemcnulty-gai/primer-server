@@ -4,13 +4,11 @@ This document describes the API endpoints available in the Primer Story Engine.
 
 ## Base URL
 
-All API endpoints are prefixed with `/api/v1/story`.
+All API endpoints are prefixed with `/v1/story`.
 
 ## Authentication
 
-Authentication is done via one of:
-- A JWT token sent in the `Authorization` header
-- A device ID sent in the `X-Device-ID` header (for demo and testing purposes)
+Authentication is done via a device ID sent in the `X-Device-ID` header.
 
 ## Story Endpoints
 
@@ -18,7 +16,7 @@ Authentication is done via one of:
 
 Retrieves the current story segment for the user.
 
-**Endpoint:** `GET /api/v1/story/current`
+**Endpoint:** `GET /v1/story/current`
 
 **Response:**
 ```json
@@ -51,7 +49,7 @@ Retrieves the current story segment for the user.
 
 Makes a choice and progress the story to the next segment.
 
-**Endpoint:** `POST /api/v1/story/choice`
+**Endpoint:** `POST /v1/story/choice`
 
 **Request Body:**
 ```json
@@ -91,7 +89,7 @@ Makes a choice and progress the story to the next segment.
 
 Updates story progress and user preferences.
 
-**Endpoint:** `POST /api/v1/story/progress`
+**Endpoint:** `POST /v1/story/progress`
 
 **Request Body:**
 ```json
@@ -127,7 +125,7 @@ Updates story progress and user preferences.
 
 Resets the story for the user.
 
-**Endpoint:** `POST /api/v1/story/reset`
+**Endpoint:** `POST /v1/story/reset`
 
 **Response:**
 ```json
@@ -157,13 +155,62 @@ Resets the story for the user.
 }
 ```
 
+### Start Conversation
+
+Starts a new conversational story.
+
+**Endpoint:** `POST /v1/story/conversation/start`
+
+**Request Body:**
+```json
+{
+  "prompt": "A story about a space explorer",
+  "preferences": {
+    "genre": "sci-fi",
+    "tone": "exciting"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "response": "You are Captain Zara of the Stellar Explorer, a spaceship designed for deep space exploration. Your mission is to chart the uncharted regions of the Andromeda Galaxy. What would you like to do first?",
+  "conversationId": "conv-123456"
+}
+```
+
+### Converse With Story
+
+Continues a conversational story with user input.
+
+**Endpoint:** `POST /v1/story/converse`
+
+**Request Body:**
+```json
+{
+  "message": "I want to explore the nearest planet",
+  "conversationId": "conv-123456"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "response": "You direct your ship towards Proxima B, the nearest potentially habitable planet. As you approach, your scanners detect unusual energy readings coming from the surface. What's your next move?",
+  "conversationId": "conv-123456"
+}
+```
+
 ## Illustration Endpoints
 
 ### Get Current Segment Illustrations
 
 Retrieves illustrations for the current story segment.
 
-**Endpoint:** `GET /api/v1/story/illustrations/current`
+**Endpoint:** `GET /v1/story/illustrations/current`
 
 **Response:**
 ```json
@@ -188,7 +235,7 @@ Retrieves illustrations for the current story segment.
 
 Retrieves illustrations for a specific story segment.
 
-**Endpoint:** `GET /api/v1/story/illustrations/segment/:segmentId`
+**Endpoint:** `GET /v1/story/illustrations/segment/:segmentId`
 
 **Response:**
 ```json
@@ -213,7 +260,7 @@ Retrieves illustrations for a specific story segment.
 
 Search for illustrations based on custom criteria.
 
-**Endpoint:** `GET /api/v1/story/illustrations/search?themes=fantasy,adventure&tags=hero,protagonist&limit=2`
+**Endpoint:** `GET /v1/story/illustrations/search?themes=fantasy,adventure&tags=hero,protagonist&limit=2`
 
 **Response:**
 ```json
@@ -242,7 +289,7 @@ Search for illustrations based on custom criteria.
 
 Retrieves a specific illustration by ID.
 
-**Endpoint:** `GET /api/v1/story/illustrations/:id`
+**Endpoint:** `GET /v1/story/illustrations/:id`
 
 **Response:**
 ```json
@@ -256,6 +303,158 @@ Retrieves a specific illustration by ID.
     "segmentMappings": ["dragon-battle", "mountain-peak"],
     "themes": ["fantasy", "danger", "adventure"],
     "createdAt": "2023-06-15T14:45:00Z"
+  }
+}
+```
+
+## Monitoring Endpoints
+
+### Get Dashboard Data
+
+Retrieves monitoring dashboard data.
+
+**Endpoint:** `GET /v1/monitoring/dashboard`
+
+**Response:**
+```json
+{
+  "success": true,
+  "timestamp": "2023-06-15T15:00:00Z",
+  "data": {
+    "totalStories": 250,
+    "activeUsers": 45,
+    "avgResponseTime": 1250,
+    "gptUsage": {
+      "totalTokens": 1500000,
+      "promptTokens": 500000,
+      "completionTokens": 1000000
+    }
+  }
+}
+```
+
+### Get GPT Metrics
+
+Retrieves recent GPT usage metrics.
+
+**Endpoint:** `GET /v1/monitoring/gpt?limit=100`
+
+**Response:**
+```json
+{
+  "success": true,
+  "count": 2,
+  "metrics": [
+    {
+      "id": "gpt-123",
+      "userId": "user123",
+      "timestamp": "2023-06-15T14:50:00Z",
+      "promptTokens": 150,
+      "completionTokens": 200,
+      "totalTokens": 350,
+      "responseTimeMs": 1200
+    },
+    {
+      "id": "gpt-124",
+      "userId": "user456",
+      "timestamp": "2023-06-15T14:52:00Z",
+      "promptTokens": 180,
+      "completionTokens": 250,
+      "totalTokens": 430,
+      "responseTimeMs": 1500
+    }
+  ]
+}
+```
+
+### Get Story Generation Metrics
+
+Retrieves recent story generation metrics.
+
+**Endpoint:** `GET /v1/monitoring/story?limit=100`
+
+**Response:**
+```json
+{
+  "success": true,
+  "count": 2,
+  "metrics": [
+    {
+      "id": "story-123",
+      "userId": "user123",
+      "timestamp": "2023-06-15T14:55:00Z",
+      "segmentId": "forest-path",
+      "choiceId": "choice1",
+      "generationTimeMs": 1500
+    },
+    {
+      "id": "story-124",
+      "userId": "user456",
+      "timestamp": "2023-06-15T14:57:00Z",
+      "segmentId": "mountain-path",
+      "choiceId": "choice2",
+      "generationTimeMs": 1700
+    }
+  ]
+}
+```
+
+### Get User Metrics
+
+Retrieves metrics for a specific user.
+
+**Endpoint:** `GET /v1/monitoring/user/:userId?limit=50`
+
+**Response:**
+```json
+{
+  "success": true,
+  "userId": "user123",
+  "gptMetrics": {
+    "count": 1,
+    "metrics": [
+      {
+        "id": "gpt-123",
+        "userId": "user123",
+        "timestamp": "2023-06-15T14:50:00Z",
+        "promptTokens": 150,
+        "completionTokens": 200,
+        "totalTokens": 350,
+        "responseTimeMs": 1200
+      }
+    ]
+  },
+  "storyMetrics": {
+    "count": 1,
+    "metrics": [
+      {
+        "id": "story-123",
+        "userId": "user123",
+        "timestamp": "2023-06-15T14:55:00Z",
+        "segmentId": "forest-path",
+        "choiceId": "choice1",
+        "generationTimeMs": 1500
+      }
+    ]
+  }
+}
+```
+
+## Health Endpoint
+
+### Health Check
+
+Checks if the API is functioning correctly.
+
+**Endpoint:** `GET /health`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "status": "ok",
+    "timestamp": "2023-06-15T15:10:00Z"
   }
 }
 ```

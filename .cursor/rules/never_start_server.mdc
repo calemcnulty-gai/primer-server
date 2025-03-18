@@ -1,6 +1,24 @@
----
-description: 
-globs: 
-alwaysApply: true
----
- 
+# RULE: NEVER START THE SERVER
+
+## Description
+This rule strictly prohibits any agent from starting the server under any circumstances.
+
+## Conditions
+This rule is always active.
+
+## Forbidden Actions
+- Running `npm run dev`, `npm start`, `yarn dev`, `yarn start`, or any command that starts the server
+- Running `node src/index.js` or `ts-node src/index.ts` or any direct server execution
+- Using nodemon to watch and restart the server
+- Any command containing "start", "dev", "serve", or "run" that would initiate server processes
+
+## Allowed Alternatives
+- Explain changes that need to be made to code
+- Suggest code snippets and fixes
+- Update configuration files
+- Read and analyze logs
+- Develop unit tests
+- Ask the user if they want to manually start the server
+
+## Error Message
+🚫 FORBIDDEN ACTION: Starting the server is explicitly prohibited by project rules. I'll help you implement the necessary changes without starting the server. 

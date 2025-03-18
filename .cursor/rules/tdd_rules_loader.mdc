@@ -1,6 +1,95 @@
 ---
-description: 
-globs: 
-alwaysApply: false
+description: TDD Rules Loader
+globs: ["src/**/*.ts", "plans/*.md"]
 ---
- 
+# TDD Rules Loader
+
+This rule automatically loads TDD-related cursor rules when working on relevant files.
+
+<rule>
+name: tdd_rules_loader
+description: Automatically loads TDD rules based on context
+filters:
+  - type: file_extension
+    pattern: "\\.(ts|js|md)$"
+  - type: event
+    pattern: "file_open|file_create|file_modify"
+
+actions:
+  - type: load_rules
+    conditions:
+      # Load TDD rules when editing implementation files
+      - pattern: "src/(?!test/).*\\.(ts|js)$"
+        in_path: true
+    rules:
+      - .cursor/rules/enforce_tdd.mdc
+      - .cursor/rules/test_structure.mdc
+  
+  - type: load_rules
+    conditions:
+      # Load checklist tracking when working with the project checklist
+      - pattern: "plans/project_structure_checklist\\.md$"
+        in_path: true
+    rules:
+      - .cursor/rules/tdd_checklist_tracking.mdc
+  
+  - type: load_rules
+    conditions:
+      # Load all TDD rules when working with test files
+      - pattern: "src/test/__tests__/.*\\.(ts|js)$"
+        in_path: true
+    rules:
+      - .cursor/rules/enforce_tdd.mdc
+      - .cursor/rules/test_structure.mdc
+      - .cursor/rules/tdd_checklist_tracking.mdc
+
+  - type: suggest
+    conditions:
+      # When working on implementation files
+      - pattern: "src/(?!test/).*\\.(ts|js)$"
+        in_path: true
+    message: |
+      ## TDD Mode Activated
+      
+      Working on implementation files with strict TDD:
+      - Tests must be written before implementation
+      - Tests must pass before completing implementation
+      - Follow Red-Green-Refactor cycle
+
+  - type: suggest
+    conditions:
+      # When working on the project checklist
+      - pattern: "plans/project_structure_checklist\\.md$"
+        in_path: true
+    message: |
+      ## TDD Checklist Tracking
+      
+      Changes to the project checklist will be tracked:
+      - New checklist items will trigger TDD workflow reminders
+      - Completed items will be verified for test coverage
+      - Tasks require passing tests before being marked complete
+
+examples:
+  - input: |
+      // Opening a source file
+      // File: src/controllers/userController.ts
+    output: |
+      TDD Mode Activated:
+      - enforce_tdd.mdc loaded
+      - test_structure.mdc loaded
+      
+      Working on implementation files with strict TDD...
+
+  - input: |
+      // Opening the project checklist
+      // File: plans/project_structure_checklist.md
+    output: |
+      TDD Checklist Tracking:
+      - tdd_checklist_tracking.mdc loaded
+      
+      Changes to the project checklist will be tracked...
+
+metadata:
+  priority: high
+  version: 1.0
+</rule> 
