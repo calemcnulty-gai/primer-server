@@ -1,0 +1,159 @@
+{
+  "id": "adventure_template",
+  "variables": [
+    {
+      "name": "character_name",
+      "type": "string",
+      "required": true,
+      "default": "Adventurer"
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "required": true,
+      "default": "Mystical Land"
+    },
+    {
+      "name": "age",
+      "type": "number",
+      "required": false,
+      "default": 12
+    },
+    {
+      "name": "is_brave",
+      "type": "boolean",
+      "required": false,
+      "default": true
+    }
+  ],
+  "segmentTemplates": {
+    "intro": {
+      "id": "intro",
+      "template": "Once upon a time in {location}, there lived a young {character_name} who was {age} years old. {character_name} had always dreamed of adventure and discovery. One day, while exploring the edge of the forest near home, {character_name} noticed something unusual - a faint glowing light emanating from between the trees. {is_brave ? 'Without hesitation' : 'With a mix of fear and curiosity'}, {character_name} approached the mysterious glow.",
+      "choices": [
+        {
+          "id": "follow_light",
+          "text": "Follow the glowing light deeper into the forest",
+          "nextSegmentId": "forest_interior"
+        },
+        {
+          "id": "call_friend",
+          "text": "Go back home to get a friend before investigating",
+          "nextSegmentId": "friend_house"
+        }
+      ]
+    },
+    "forest_interior": {
+      "id": "forest_interior",
+      "template": "{character_name} followed the mesmerizing light, venturing deeper into the forest. The trees grew thicker, and the path narrower. Eventually, {character_name} reached a small clearing where the light seemed to be emanating from an ancient stone pedestal. On top of the pedestal was a mysterious artifact - a small crystal orb that pulsed with an inner light.",
+      "choices": [
+        {
+          "id": "touch_orb",
+          "text": "Reach out and touch the glowing orb",
+          "nextSegmentId": "touch_artifact"
+        },
+        {
+          "id": "examine_surroundings",
+          "text": "Examine the surroundings before touching anything",
+          "nextSegmentId": "examine_clearing"
+        }
+      ]
+    },
+    "touch_artifact": {
+      "id": "touch_artifact",
+      "template": "As {character_name}'s fingers made contact with the crystal orb, a flash of blinding light erupted. When {character_name} could see again, the forest was gone. Instead, {character_name} found themself standing in what appeared to be an ancient temple, with high ceilings adorned with unfamiliar symbols and massive columns supporting the structure. The orb was still in {character_name}'s hand, but now it was dim.",
+      "choices": [
+        {
+          "id": "explore_temple",
+          "text": "Explore the mysterious temple",
+          "nextSegmentId": "temple_exploration"
+        },
+        {
+          "id": "find_exit",
+          "text": "Look for a way back home",
+          "nextSegmentId": "search_for_exit"
+        }
+      ]
+    },
+    "examine_clearing": {
+      "id": "examine_clearing",
+      "template": "Wisely, {character_name} decided to examine the clearing before touching the mysterious artifact. Around the pedestal, {character_name} noticed a circle of small stones arranged in a pattern. There were also strange symbols carved into nearby trees. Looking more closely at the pedestal, {character_name} could see an inscription in an ancient language.",
+      "choices": [
+        {
+          "id": "decipher_inscription",
+          "text": "Try to decipher the inscription",
+          "nextSegmentId": "read_inscription"
+        },
+        {
+          "id": "touch_orb_anyway",
+          "text": "Touch the orb despite the mysterious surroundings",
+          "nextSegmentId": "touch_artifact"
+        }
+      ]
+    },
+    "friend_house": {
+      "id": "friend_house",
+      "template": "{character_name} decided it would be wiser not to venture into the forest alone. Running back to the village, {character_name} knocked on the door of {character_name}'s best friend, Mira. After explaining the strange glow in the forest, Mira agreed to come along. Together, they returned to the spot where {character_name} had seen the light.",
+      "choices": [
+        {
+          "id": "follow_with_friend",
+          "text": "Follow the light into the forest with Mira",
+          "nextSegmentId": "forest_interior_duo"
+        },
+        {
+          "id": "bring_adults",
+          "text": "Decide to tell the adults about the strange light",
+          "nextSegmentId": "tell_adults"
+        }
+      ]
+    },
+    "forest_interior_duo": {
+      "id": "forest_interior_duo",
+      "template": "{character_name} and Mira followed the mesmerizing light, venturing deeper into the forest. They whispered excitedly to each other as they went. Eventually, they reached a small clearing where the light seemed to be emanating from an ancient stone pedestal. On top of the pedestal was a mysterious artifact - a small crystal orb that pulsed with an inner light. \"What do you think it is?\" Mira asked in a hushed voice.",
+      "choices": [
+        {
+          "id": "touch_orb_together",
+          "text": "Suggest both touching the orb together",
+          "nextSegmentId": "touch_artifact_duo"
+        },
+        {
+          "id": "examine_together",
+          "text": "Examine the surroundings together before touching anything",
+          "nextSegmentId": "examine_clearing_duo"
+        }
+      ]
+    },
+    "temple_exploration": {
+      "id": "temple_exploration", 
+      "template": "{character_name} began to explore the vast temple. The halls seemed to go on forever, with doorways leading to various chambers. In one room, {character_name} found a large pool of water that reflected not the ceiling above but a starry night sky. In another, there were statues of beings that were neither human nor animal, but something in between.",
+      "choices": [
+        {
+          "id": "water_pool",
+          "text": "Look more closely at the pool of stars",
+          "nextSegmentId": "star_pool"
+        },
+        {
+          "id": "statues",
+          "text": "Examine the strange statues",
+          "nextSegmentId": "guardian_statues"
+        }
+      ]
+    },
+    "read_inscription": {
+      "id": "read_inscription",
+      "template": "As {character_name} studied the inscription, the symbols began to shift and change, rearranging themselves into words {character_name} could understand. \"The Gateway opens for the curious heart. Passage granted to other worlds, but remember: what passes through may not return unchanged.\" A warning, certainly, but also an invitation to adventure.",
+      "choices": [
+        {
+          "id": "touch_orb_informed",
+          "text": "Touch the orb now knowing it's a gateway",
+          "nextSegmentId": "touch_artifact_informed"
+        },
+        {
+          "id": "leave_clearing",
+          "text": "Decide this is too dangerous and leave the clearing",
+          "nextSegmentId": "return_home"
+        }
+      ]
+    }
+  }
+} 

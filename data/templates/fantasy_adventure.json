@@ -1,0 +1,104 @@
+{
+  "id": "fantasy_adventure",
+  "variables": [
+    {
+      "name": "character_name",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "character_class",
+      "type": "string",
+      "required": true,
+      "default": "adventurer"
+    },
+    {
+      "name": "starting_location",
+      "type": "string",
+      "required": true,
+      "default": "the village of Millbrook"
+    }
+  ],
+  "segmentTemplates": {
+    "intro": {
+      "id": "intro",
+      "template": "In {starting_location}, a young {character_class} named {character_name} stands at the crossroads of destiny. The morning sun casts long shadows across the cobblestone streets as the village bustles with activity. A notice board nearby catches your attention, while the path leading to the dark forest beckons with mystery.",
+      "choices": [
+        {
+          "id": "check_notice",
+          "text": "Check the notice board for quests",
+          "nextSegmentId": "notice_board"
+        },
+        {
+          "id": "explore_forest",
+          "text": "Venture into the dark forest",
+          "nextSegmentId": "forest_entrance"
+        }
+      ]
+    },
+    "notice_board": {
+      "id": "notice_board",
+      "template": "Approaching the notice board, {character_name} finds several parchments pinned haphazardly. Two catch your eye: a reward poster for a dangerous beast terrorizing local farms, and an elegant letter seeking a courier for a mysterious package to the capital.",
+      "choices": [
+        {
+          "id": "hunt_beast",
+          "text": "Accept the beast hunting quest",
+          "nextSegmentId": "beast_hunt"
+        },
+        {
+          "id": "courier_job",
+          "text": "Take the courier job",
+          "nextSegmentId": "courier_mission"
+        }
+      ]
+    },
+    "forest_entrance": {
+      "id": "forest_entrance",
+      "template": "The dark forest looms before {character_name}, its ancient trees creaking in the wind. A narrow path winds deeper into the shadows, while a recently disturbed patch of earth nearby suggests something valuable might be buried.",
+      "choices": [
+        {
+          "id": "follow_path",
+          "text": "Follow the winding path deeper",
+          "nextSegmentId": "deep_forest"
+        },
+        {
+          "id": "investigate_ground",
+          "text": "Investigate the disturbed earth",
+          "nextSegmentId": "buried_treasure"
+        }
+      ]
+    },
+    "beast_hunt": {
+      "id": "beast_hunt",
+      "template": "Armed with determination, {character_name} the {character_class} sets out to track the beast. Fresh tracks lead to a cave in the hillside, while smoke rises from a nearby farmhouse that might have information.",
+      "choices": [
+        {
+          "id": "enter_cave",
+          "text": "Enter the beast's cave",
+          "nextSegmentId": "cave_confrontation"
+        },
+        {
+          "id": "ask_farmers",
+          "text": "Question the farmers first",
+          "nextSegmentId": "farmer_info"
+        }
+      ]
+    },
+    "courier_mission": {
+      "id": "courier_mission",
+      "template": "The mysterious package is sealed with strange runes. As {character_name} prepares to leave, you notice you're being watched by a cloaked figure in the shadows. The main road to the capital lies ahead, but there's also a less-traveled mountain path.",
+      "choices": [
+        {
+          "id": "main_road",
+          "text": "Take the main road",
+          "nextSegmentId": "road_journey"
+        },
+        {
+          "id": "mountain_path",
+          "text": "Risk the mountain path",
+          "nextSegmentId": "mountain_trek"
+        }
+      ]
+    }
+  }
+} 

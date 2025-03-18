@@ -1,0 +1,159 @@
+{
+  "id": "mystery_template",
+  "variables": [
+    {
+      "name": "character_name",
+      "type": "string",
+      "required": true,
+      "default": "Detective"
+    },
+    {
+      "name": "location",
+      "type": "string",
+      "required": true,
+      "default": "Foggy Town"
+    },
+    {
+      "name": "year",
+      "type": "number",
+      "required": false,
+      "default": 1985
+    },
+    {
+      "name": "is_analytical",
+      "type": "boolean",
+      "required": false,
+      "default": true
+    }
+  ],
+  "segmentTemplates": {
+    "intro": {
+      "id": "intro",
+      "template": "The year was {year} in {location}, where the fog rolled in thick every evening. {character_name} had a reputation for solving cases that had others stumped. It was a quiet Tuesday when the phone rang. \"Hello, {character_name} speaking,\" {character_name} answered. The voice on the other end was tense, almost a whisper. \"There's been a break-in at the museum. The famous Blue Diamond is missing. We need your help.\" {is_analytical ? 'Methodically noting the details' : 'With excitement rising'}, {character_name} agreed to take the case.",
+      "choices": [
+        {
+          "id": "visit_museum",
+          "text": "Go directly to the museum to examine the crime scene",
+          "nextSegmentId": "museum_scene"
+        },
+        {
+          "id": "police_first",
+          "text": "Meet with the police chief first to get official details",
+          "nextSegmentId": "police_station"
+        }
+      ]
+    },
+    "museum_scene": {
+      "id": "museum_scene",
+      "template": "The museum was cordoned off with police tape when {character_name} arrived. Officers were taking photographs and dusting for fingerprints. The glass case that had housed the Blue Diamond was shattered, but strangely, the alarm system hadn't been triggered. {character_name} noticed something odd immediately: there was no glass on the inside of the display case.",
+      "choices": [
+        {
+          "id": "examine_case",
+          "text": "Examine the display case more thoroughly",
+          "nextSegmentId": "examine_display"
+        },
+        {
+          "id": "talk_guards",
+          "text": "Interview the security guards on duty that night",
+          "nextSegmentId": "security_interview"
+        }
+      ]
+    },
+    "police_station": {
+      "id": "police_station",
+      "template": "At the police station, Chief Morgan greeted {character_name} with a firm handshake. \"Glad you could come on such short notice. This theft has the mayor breathing down my neck.\" The chief laid out the facts: the Blue Diamond was stolen sometime between midnight and 6 AM. The security cameras had mysteriously malfunctioned for exactly seventeen minutes during that period. No alarms were triggered.",
+      "choices": [
+        {
+          "id": "camera_logs",
+          "text": "Ask to review the security camera logs",
+          "nextSegmentId": "review_footage"
+        },
+        {
+          "id": "now_to_museum",
+          "text": "Thank the chief and head to the museum",
+          "nextSegmentId": "museum_scene"
+        }
+      ]
+    },
+    "examine_display": {
+      "id": "examine_display",
+      "template": "{character_name} carefully inspected the broken display case. The glass was indeed shattered, but all the shards were on the outside, suggesting the case was broken from the inside. Even more curious, the metal frame showed no signs of being forced open from either direction. It was as if the diamond had simply vanished through the glass.",
+      "choices": [
+        {
+          "id": "check_security",
+          "text": "Check the security system setup",
+          "nextSegmentId": "security_room"
+        },
+        {
+          "id": "dust_inside",
+          "text": "Look for fingerprints inside the case",
+          "nextSegmentId": "internal_examination"
+        }
+      ]
+    },
+    "security_interview": {
+      "id": "security_interview",
+      "template": "There were two guards on duty the night of the theft. The first, James Willis, had worked at the museum for fifteen years. He appeared nervous, his eyes darting around the room as he spoke. The second guard, Melissa Chen, was newer, having worked there for just six months. She was calm and precise in her recounting of events. Both claimed they saw nothing unusual except for a brief power flicker around 2 AM.",
+      "choices": [
+        {
+          "id": "focus_james",
+          "text": "Press James about his nervousness",
+          "nextSegmentId": "interrogate_james"
+        },
+        {
+          "id": "power_flicker",
+          "text": "Investigate the power flicker they mentioned",
+          "nextSegmentId": "electrical_room"
+        }
+      ]
+    },
+    "review_footage": {
+      "id": "review_footage",
+      "template": "In a small, dimly lit room, {character_name} sat down to review the security footage. The videos showed normal museum activity until exactly 1:43 AM, when the screens went to static. When the footage resumed at 2:00 AM, everything appeared undisturbed. {character_name} rewound and replayed the last few seconds before the static, noticing a brief shadow moving across one of the cameras.",
+      "choices": [
+        {
+          "id": "enhance_shadow",
+          "text": "Try to enhance the image of the shadow",
+          "nextSegmentId": "technical_analysis"
+        },
+        {
+          "id": "check_other_angles",
+          "text": "Check if other cameras caught the same shadow",
+          "nextSegmentId": "multiple_angles"
+        }
+      ]
+    },
+    "security_room": {
+      "id": "security_room",
+      "template": "The security room was a hub of technology, with monitors showing feeds from cameras throughout the museum. {character_name} examined the alarm system controls. According to the logs, the system was indeed armed that night, but there was something unusual – a maintenance override had been logged at 1:30 AM, thirteen minutes before the cameras failed.",
+      "choices": [
+        {
+          "id": "trace_override",
+          "text": "Try to trace who authorized the maintenance override",
+          "nextSegmentId": "authorization_trail"
+        },
+        {
+          "id": "return_to_scene",
+          "text": "Return to the crime scene with this new information",
+          "nextSegmentId": "armed_with_clues"
+        }
+      ]
+    },
+    "interrogate_james": {
+      "id": "interrogate_james",
+      "template": "{character_name} took James aside for a more private conversation. \"You seem uncomfortable, James. Fifteen years is a long time to work somewhere. You must know this museum better than anyone.\" Under the pressure, James admitted that he'd fallen asleep briefly during his shift – something strictly against protocol. He was afraid of losing his job, but insisted he'd seen or heard nothing suspicious when awake.",
+      "choices": [
+        {
+          "id": "believe_james",
+          "text": "Believe James and look for other leads",
+          "nextSegmentId": "new_leads"
+        },
+        {
+          "id": "suspect_james",
+          "text": "Suspect James might be hiding more",
+          "nextSegmentId": "background_check"
+        }
+      ]
+    }
+  }
+} 

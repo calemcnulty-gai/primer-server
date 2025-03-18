@@ -1,0 +1,131 @@
+[
+  {
+    "id": "forest-path",
+    "path": "/illustrations/forest-path.jpg",
+    "description": "A winding path through a lush, magical forest",
+    "tags": [
+      "forest",
+      "path",
+      "nature",
+      "adventure",
+      "journey"
+    ],
+    "segmentMappings": [
+      "intro",
+      "forest-segment"
+    ],
+    "themes": [
+      "fantasy",
+      "adventure"
+    ],
+    "locations": [
+      "forest",
+      "woods"
+    ],
+    "createdAt": "2025-03-18T17:36:00.814Z"
+  },
+  {
+    "id": "mysterious-cave",
+    "path": "/illustrations/mysterious-cave.jpg",
+    "description": "A dark cave entrance with glowing crystals inside",
+    "tags": [
+      "cave",
+      "crystals",
+      "mystery",
+      "darkness"
+    ],
+    "segmentMappings": [
+      "cave-entrance",
+      "underground-discovery"
+    ],
+    "themes": [
+      "mystery",
+      "fantasy",
+      "adventure"
+    ],
+    "locations": [
+      "cave",
+      "underground"
+    ],
+    "createdAt": "2025-03-18T17:36:00.814Z"
+  },
+  {
+    "id": "ancient-temple",
+    "path": "/illustrations/ancient-temple.jpg",
+    "description": "An ancient stone temple covered in vines and moss",
+    "tags": [
+      "temple",
+      "ruins",
+      "ancient",
+      "stone",
+      "vegetation"
+    ],
+    "segmentMappings": [
+      "temple-discovery",
+      "hidden-ruins"
+    ],
+    "themes": [
+      "fantasy",
+      "history",
+      "adventure"
+    ],
+    "locations": [
+      "temple",
+      "ruins",
+      "jungle"
+    ],
+    "createdAt": "2025-03-18T17:36:00.814Z"
+  },
+  {
+    "id": "hero-character",
+    "path": "/illustrations/hero.jpg",
+    "description": "The protagonist of the story, ready for adventure",
+    "tags": [
+      "hero",
+      "character",
+      "protagonist",
+      "adventurer"
+    ],
+    "segmentMappings": [
+      "intro",
+      "character-development"
+    ],
+    "themes": [
+      "adventure",
+      "fantasy"
+    ],
+    "characters": [
+      "hero",
+      "protagonist",
+      "adventurer"
+    ],
+    "createdAt": "2025-03-18T17:36:00.814Z"
+  },
+  {
+    "id": "dragon-encounter",
+    "path": "/illustrations/dragon.jpg",
+    "description": "A massive dragon perched on a mountain peak",
+    "tags": [
+      "dragon",
+      "mountain",
+      "danger",
+      "creature"
+    ],
+    "segmentMappings": [
+      "dragon-battle",
+      "mountain-peak"
+    ],
+    "themes": [
+      "fantasy",
+      "danger",
+      "adventure"
+    ],
+    "characters": [
+      "dragon"
+    ],
+    "locations": [
+      "mountain"
+    ],
+    "createdAt": "2025-03-18T17:36:00.814Z"
+  }
+]
