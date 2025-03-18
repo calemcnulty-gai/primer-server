@@ -109,4 +109,4 @@ The API uses device ID based authentication. To authenticate requests:
 - `npm start` - Start production server
 - `npm run test` - Run tests
 - `npm run lint` - Run linter
-- `npm run clean` - Clean build directory 
+- `npm run clean` - Clean build directory
