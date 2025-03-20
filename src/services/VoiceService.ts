@@ -1,4 +1,10 @@
 import { EventEmitter } from 'events';
+import { DeepgramService } from './DeepgramService';
+import { GeminiService } from './GeminiService';
+import { CartesiaService } from './CartesiaService';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('VoiceService');
 
 // Interface for WebRTC connection
 interface RTCConnection {
@@ -6,12 +12,16 @@ interface RTCConnection {
   state: 'new' | 'connecting' | 'connected' | 'failed' | 'closed';
   isListening: boolean;
   lastActivity: number;
+  audioBuffer?: Buffer[]; // Buffer to collect audio chunks
 }
 
 export class VoiceService extends EventEmitter {
   private connections: Map<string, RTCConnection>;
   private status: 'initializing' | 'running' | 'error';
   private iceServers: Array<{ urls: string }>;
+  private deepgramService: DeepgramService;
+  private geminiService: GeminiService;
+  private cartesiaService: CartesiaService;
 
   constructor() {
     super();
@@ -21,6 +31,11 @@ export class VoiceService extends EventEmitter {
       { urls: 'stun:stun.l.google.com:19302' },
       // Add more STUN/TURN servers as needed
     ];
+
+    // Initialize services
+    this.deepgramService = new DeepgramService();
+    this.geminiService = new GeminiService();
+    this.cartesiaService = new CartesiaService();
 
     // Initialize the service
     this.initialize();
@@ -67,15 +82,22 @@ export class VoiceService extends EventEmitter {
       ws,
       state: 'new',
       isListening: false,
-      lastActivity: Date.now()
+      lastActivity: Date.now(),
+      audioBuffer: []
     };
 
     // Store the connection
     this.connections.set(connectionId, connection);
 
     // Set up WebSocket message handler
-    ws.on('message', (message: string) => {
-      this.handleWebSocketMessage(connectionId, message);
+    ws.on('message', (message: any) => {
+      // Check if message is a string (signaling) or binary (audio data)
+      if (typeof message === 'string' || message instanceof String) {
+        this.handleWebSocketMessage(connectionId, message.toString());
+      } else {
+        // Handle binary audio data
+        this.handleAudioData(connectionId, message);
+      }
     });
 
     // Set up WebSocket close handler
@@ -85,11 +107,27 @@ export class VoiceService extends EventEmitter {
 
     // Set up WebSocket error handler
     ws.on('error', (error: Error) => {
-      console.error(`WebSocket error for connection ${connectionId}:`, error);
+      logger.error(`WebSocket error for connection ${connectionId}:`, error);
       this.sendError(connectionId, 'CONNECTION_FAILED', 'WebSocket connection error');
     });
 
-    console.log(`New voice connection established: ${connectionId}`);
+    logger.info(`New voice connection established: ${connectionId}`);
+  }
+  
+  /**
+   * Handle incoming audio data from WebRTC
+   */
+  private handleAudioData(connectionId: string, audioChunk: Buffer): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection || !connection.isListening) return;
+    
+    // Store the audio chunk in the connection's buffer
+    connection.audioBuffer?.push(audioChunk);
+    
+    // Update the last activity timestamp
+    connection.lastActivity = Date.now();
+    
+    logger.debug(`Received audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes`);
   }
 
   /**
@@ -198,39 +236,107 @@ export class VoiceService extends EventEmitter {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
 
+    // Reset audio buffer
+    connection.audioBuffer = [];
     connection.isListening = true;
-    console.log(`Started listening to connection ${connectionId}`);
-    
-    // Simulate processing and responding to audio
-    // In a real implementation, this would involve actual audio processing
-    setTimeout(() => {
-      // Send speaking-start notification
-      this.sendMessage(connectionId, { type: 'speaking-start' });
-      
-      // Simulate audio processing delay
-      setTimeout(() => {
-        // Send speaking-end notification
-        this.sendMessage(connectionId, { type: 'speaking-end' });
-      }, 3000);
-    }, 1000);
+    logger.info(`Started listening to connection ${connectionId}`);
   }
 
   /**
-   * Stop listening to the client's audio stream
+   * Stop listening to the client's audio stream and process the collected audio
    */
-  private stopListening(connectionId: string): void {
+  private async stopListening(connectionId: string): Promise<void> {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
 
     connection.isListening = false;
-    console.log(`Stopped listening to connection ${connectionId}`);
+    logger.info(`Stopped listening to connection ${connectionId}`);
+    
+    // Process the collected audio
+    if (connection.audioBuffer && connection.audioBuffer.length > 0) {
+      try {
+        // Combine audio chunks into a single buffer
+        const audioData = Buffer.concat(connection.audioBuffer);
+        
+        if (audioData.length === 0) {
+          this.sendError(connectionId, 'MEDIA_ERROR', 'No audio data received');
+          return;
+        }
+        
+        logger.info(`Processing ${audioData.length} bytes of audio data from connection ${connectionId}`);
+        
+        // Start the processing pipeline
+        await this.processAudio(connectionId, audioData);
+        
+        // Clear the buffer after processing
+        connection.audioBuffer = [];
+      } catch (error) {
+        logger.error(`Error processing audio from connection ${connectionId}:`, error);
+        this.sendError(
+          connectionId, 
+          'MEDIA_ERROR', 
+          `Failed to process audio: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    } else {
+      logger.warn(`No audio data collected from connection ${connectionId}`);
+      this.sendError(connectionId, 'MEDIA_ERROR', 'No audio data received');
+    }
+  }
+  
+  /**
+   * Process audio data through STT -> LLM -> TTS pipeline
+   */
+  private async processAudio(connectionId: string, audioData: Buffer): Promise<void> {
+    const connection = this.connections.get(connectionId);
+    if (!connection) return;
+    
+    try {
+      // Step 1: Speech-to-text with Deepgram
+      const transcribedText = await this.deepgramService.transcribeAudio(audioData);
+      
+      if (!transcribedText) {
+        this.sendError(connectionId, 'MEDIA_ERROR', 'Failed to transcribe audio (empty result)');
+        return;
+      }
+      
+      // Step 2: Process with Gemini LLM
+      const llmResponse = await this.geminiService.processText(transcribedText);
+      
+      // Step 3: Text-to-speech with Cartesia
+      this.sendMessage(connectionId, { type: 'speaking-start' });
+      
+      const audioResponse = await this.cartesiaService.textToSpeech(llmResponse);
+      
+      // Step 4: Send audio back to client
+      // In a real implementation with WebRTC, this would be sent through the audio track
+      // For our mock implementation, we'll simulate sending the audio
+      logger.info(`Sending ${audioResponse.length} bytes of audio back to connection ${connectionId}`);
+      
+      // Since we're not actually sending audio over WebRTC in this implementation,
+      // we'll simulate a delay based on audio length
+      const audioDurationMs = Math.min(audioResponse.length / 16, 5000); // Rough estimate
+      
+      setTimeout(() => {
+        // Send speaking-end notification when "playback" is complete
+        this.sendMessage(connectionId, { type: 'speaking-end' });
+      }, audioDurationMs);
+      
+    } catch (error) {
+      logger.error(`Error in audio processing pipeline for connection ${connectionId}:`, error);
+      this.sendError(
+        connectionId, 
+        'INTERNAL_ERROR', 
+        `Audio processing failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /**
    * Handle connection closed
    */
   private handleConnectionClosed(connectionId: string): void {
-    console.log(`Voice connection closed: ${connectionId}`);
+    logger.info(`Voice connection closed: ${connectionId}`);
     this.connections.delete(connectionId);
   }
 
@@ -243,8 +349,9 @@ export class VoiceService extends EventEmitter {
 
     try {
       connection.ws.send(JSON.stringify(message));
+      logger.debug(`Sent message to connection ${connectionId}: ${message.type}`);
     } catch (error) {
-      console.error(`Error sending message to connection ${connectionId}:`, error);
+      logger.error(`Error sending message to connection ${connectionId}:`, error);
     }
   }
 
@@ -252,6 +359,7 @@ export class VoiceService extends EventEmitter {
    * Send an error message to a connection
    */
   private sendError(connectionId: string, code: string, message: string): void {
+    logger.warn(`Sending error to connection ${connectionId}: [${code}] ${message}`);
     this.sendMessage(connectionId, {
       type: 'error',
       error: {
