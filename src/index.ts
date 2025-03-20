@@ -79,13 +79,13 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
   errorHandler(err, req, res, next);
 });
 
+// Set up WebSocket for voice API - moved outside createServer to ensure it's always initialized
+setupVoiceWebSocket(server, voiceController, '/api/v1/voice');
+
 // Create server function for better testability
 export const createServer = (port: number = Number(process.env.PORT) || 3000) => {
   // Validate API keys on startup
   validateApiKeys();
-  
-  // Set up WebSocket for voice API
-  setupVoiceWebSocket(server, voiceController, '/api/v1/voice');
   
   // Start the HTTP server
   return server.listen(port, '0.0.0.0', () => {
