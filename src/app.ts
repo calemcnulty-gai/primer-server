@@ -9,7 +9,7 @@ import { attachDeviceId } from './middleware/deviceId';
 import { createBaseRouter } from './routes/baseRouter';
 import { initStoryRoutes } from './routes/story.routes';
 import { initMonitoringRoutes } from './routes/monitoring.routes';
-import { initRTVIRoutes } from './routes/rtvi.routes';
+// import { initRTVIRoutes } from './routes/rtvi.routes';
 import dotenv from 'dotenv';
 
 // Load environment variables
@@ -48,7 +48,7 @@ v1Router.use('/story', initStoryRoutes(apiKey));
 v1Router.use('/monitoring', initMonitoringRoutes());
 
 // Mount RTVI routes
-v1Router.use('/rtvi', initRTVIRoutes());
+// v1Router.use('/rtvi', initRTVIRoutes());
 
 // Mount the main router from v1Router
 app.use((v1Router as any).mainRouter);

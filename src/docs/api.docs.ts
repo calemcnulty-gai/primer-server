@@ -9,6 +9,44 @@ export function getOpenAPIDocument(): OpenAPIV3.Document {
       description: 'API for interactive storytelling',
     },
     paths: {
+      '/api/v1/voice/status': {
+        get: {
+          summary: 'Check the status of the voice service',
+          description: 'Returns whether the voice service is ready to accept connections',
+          tags: ['Voice'],
+          responses: {
+            '200': {
+              description: 'Status of the voice service',
+              content: {
+                'application/json': {
+                  schema: {
+                    $ref: '#/components/schemas/VoiceStatus',
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      '/api/v1/voice/config': {
+        get: {
+          summary: 'Get WebRTC configuration',
+          description: 'Returns the configuration needed for WebRTC connections',
+          tags: ['Voice'],
+          responses: {
+            '200': {
+              description: 'WebRTC configuration including ICE servers',
+              content: {
+                'application/json': {
+                  schema: {
+                    $ref: '#/components/schemas/WebRTCConfig',
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
       '/api/v1/story/current': {
         get: {
           summary: 'Get the current story segment',
@@ -130,6 +168,74 @@ export function getOpenAPIDocument(): OpenAPIV3.Document {
     },
     components: {
       schemas: {
+        VoiceStatus: {
+          type: 'object',
+          required: ['status', 'ready'],
+          properties: {
+            status: {
+              type: 'string',
+              description: 'Current status of the voice service',
+              enum: ['initializing', 'running', 'error'],
+            },
+            ready: {
+              type: 'boolean',
+              description: 'Whether the voice service is ready to accept connections',
+            },
+          },
+        },
+        WebRTCConfig: {
+          type: 'object',
+          required: ['iceServers'],
+          properties: {
+            iceServers: {
+              type: 'array',
+              description: 'List of ICE servers for WebRTC connection',
+              items: {
+                type: 'object',
+                required: ['urls'],
+                properties: {
+                  urls: {
+                    type: 'string',
+                    description: 'URL of the ICE server',
+                  },
+                },
+              },
+            },
+          },
+        },
+        WebRTCMessage: {
+          type: 'object',
+          required: ['type'],
+          properties: {
+            type: {
+              type: 'string',
+              description: 'Type of the WebRTC message',
+              enum: ['offer', 'answer', 'ice-candidate', 'start-listening', 'stop-listening', 'speaking-start', 'speaking-end', 'error'],
+            },
+            sdp: {
+              type: 'object',
+              description: 'Session Description Protocol data (for offer/answer types)',
+            },
+            candidate: {
+              type: 'object',
+              description: 'ICE candidate data (for ice-candidate type)',
+            },
+            error: {
+              type: 'object',
+              description: 'Error details (for error type)',
+              properties: {
+                code: {
+                  type: 'string',
+                  description: 'Error code',
+                },
+                message: {
+                  type: 'string',
+                  description: 'Human-readable error message',
+                },
+              },
+            },
+          },
+        },
         Error: {
           type: 'object',
           required: ['error'],
