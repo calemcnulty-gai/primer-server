@@ -299,27 +299,29 @@ export class WebRTCService extends EventEmitter {
         logger.info(`Received audio track for ${connectionId}: kind=${track.kind}, id=${track.id}`);
         
         if (track.kind === 'audio') {
-          // Set up track event handlers
-          track.ondata = (chunk: Buffer) => {
-            if (!connection.connected) return; // Skip if not connected
-            
-            logger.debug(`Received audio chunk: size=${chunk.length} bytes, connectionId=${connectionId}`);
-            this.emit('data', connectionId, chunk);
-          };
+          // Log track details
+          logger.info(`Audio track details for ${connectionId}:`, {
+            id: track.id,
+            kind: track.kind,
+            enabled: track.enabled,
+            muted: track.muted,
+            readyState: track.readyState
+          });
 
-          track.onended = () => {
+          // Set up direct data handling from the track
+          track.on('data', (data: Buffer) => {
+            if (!connection.connected) return;
+            logger.debug(`Received audio data: size=${data.length} bytes, connectionId=${connectionId}`);
+            this.emit('data', connectionId, data);
+          });
+
+          track.on('ended', () => {
             logger.info(`Audio track ended for ${connectionId}`);
-          };
+          });
 
-          track.onerror = (error) => {
+          track.on('error', (error) => {
             logger.error(`Audio track error for ${connectionId}:`, error);
-          };
-
-          // Log track capabilities
-          const capabilities = track.getCapabilities?.();
-          if (capabilities) {
-            logger.info(`Audio track capabilities for ${connectionId}:`, capabilities);
-          }
+          });
         }
       });
 
