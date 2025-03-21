@@ -19,8 +19,8 @@ export class CartesiaService {
       logger.warn('CARTESIA_API_KEY not set in environment variables');
     }
     
-    this.modelId = process.env.CARTESIA_MODEL_ID || 'sonic-v2';
-    this.defaultVoiceId = process.env.CARTESIA_DEFAULT_VOICE_ID || 'en-US-Neural2-F';
+    this.modelId = process.env.CARTESIA_MODEL_ID || 'sonic-2';
+    this.defaultVoiceId = process.env.CARTESIA_DEFAULT_VOICE_ID || 'c99d36f3-5ffd-4253-803a-535c1bc9c306';
     
     // Initialize Cartesia client
     this.client = new CartesiaClient({
