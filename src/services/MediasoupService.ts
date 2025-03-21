@@ -151,8 +151,8 @@ export class MediasoupService extends EventEmitter {
       // Handle WebSocket messages
       ws.on('message', async (message: RawData) => {
         try {
-          const request = JSON.parse(message.toString());
-          await this.handleRequest(peer, request);
+          const parsedMessage = JSON.parse(message.toString());
+          await this.handleRequest(peer, parsedMessage);
         } catch (error) {
           logger.error(`Error processing message from peer ${peerId}:`, error);
           this.sendError(peer, {
@@ -201,7 +201,7 @@ export class MediasoupService extends EventEmitter {
 
         case 'connectWebRtcTransport':
           await this.handleConnectWebRtcTransport(peer, data);
-          responseData = {}; // Empty object for successful void operations
+          responseData = { connected: true };
           break;
 
         case 'produce':
@@ -226,16 +226,10 @@ export class MediasoupService extends EventEmitter {
       this.sendMessage(peer, response);
     } catch (error) {
       logger.error(`Request failed [${method}]:`, error);
-      const errorResponse: ErrorResponse = {
-        response: true,
-        id,
-        ok: false,
-        error: {
-          code: error instanceof Error ? 500 : 400,
-          message: error instanceof Error ? error.message : String(error)
-        }
-      };
-      this.sendMessage(peer, errorResponse);
+      this.sendError(peer, {
+        code: error instanceof Error ? 500 : 400,
+        message: error instanceof Error ? error.message : String(error)
+      }, id);
     }
   }
 
@@ -441,14 +435,15 @@ export class MediasoupService extends EventEmitter {
     }
   }
 
-  private sendError(peer: Peer, error: { message: string, code: number }, requestId?: string): void {
+  private sendError(peer: Peer, error: { message: string, code: number }, requestId?: number): void {
     try {
-      peer.ws.send(JSON.stringify({
+      const errorResponse: ErrorResponse = {
         response: true,
-        id: requestId,
+        id: requestId || 0,
         ok: false,
         error
-      }));
+      };
+      peer.ws.send(JSON.stringify(errorResponse));
     } catch (err) {
       logger.error(`Failed to send error to peer ${peer.id}:`, err);
     }

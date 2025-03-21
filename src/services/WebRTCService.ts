@@ -33,6 +33,36 @@ export interface WebRTCEvents {
   'error': (connectionId: string, code: string, message: string) => void;
 }
 
+// Standard mediasoup message interfaces
+interface Request {
+  id: number;
+  method: string;
+  data?: any;
+}
+
+interface Response {
+  response: true;
+  id: number;
+  ok: true;
+  data?: any;
+}
+
+interface ErrorResponse {
+  response: true;
+  id: number;
+  ok: false;
+  error: {
+    code: string | number;
+    message: string;
+  };
+}
+
+interface Notification {
+  notification: true;
+  method: string;
+  data?: any;
+}
+
 export class WebRTCService extends EventEmitter {
   private connections: Map<string, RTCConnectionState>;
   private worker?: mediasoup.types.Worker;
@@ -134,13 +164,15 @@ export class WebRTCService extends EventEmitter {
       // Handle WebSocket errors
       ws.on('error', (error: Error) => {
         logger.error(`WebSocket error for ${connectionId}:`, error);
-        this.sendError(connectionId, 'CONNECTION_ERROR', error.message);
+        this.sendError(connectionId, {
+          code: 'CONNECTION_ERROR',
+          message: error instanceof Error ? error.message : 'Failed to connect'
+        }, undefined);
       });
 
       // Send initial connection info to client
-      this.sendMessage(connectionId, {
-        type: 'connection-ready',
-        routerRtpCapabilities: router.rtpCapabilities,
+      this.sendNotification(connectionId, 'routerRtpCapabilities', {
+        rtpCapabilities: router.rtpCapabilities,
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' }
@@ -151,7 +183,10 @@ export class WebRTCService extends EventEmitter {
 
     } catch (error) {
       logger.error(`Failed to setup connection ${connectionId}:`, error);
-      this.sendError(connectionId, 'SETUP_FAILED', 'Failed to initialize connection');
+      this.sendError(connectionId, {
+        code: 'SETUP_FAILED',
+        message: 'Failed to initialize connection'
+      }, undefined);
       ws.close();
     }
   }
@@ -167,243 +202,160 @@ export class WebRTCService extends EventEmitter {
     }
 
     connection.lastActivity = Date.now();
+    let parsedRequest: Request | undefined;
 
     try {
-      // Ensure proper parsing of WebSocket messages
-      let data: any;
-      if (typeof message === 'string') {
-        try {
-          data = JSON.parse(message);
-        } catch (e) {
-          logger.error(`Failed to parse message from ${connectionId}:`, e);
-          this.sendError(connectionId, 'INVALID_MESSAGE', 'Message format invalid');
-          return;
+      // Parse message
+      try {
+        if (typeof message === 'string') {
+          parsedRequest = JSON.parse(message);
+        } else if (message instanceof Buffer) {
+          parsedRequest = JSON.parse(message.toString());
+        } else if (message && typeof message === 'object') {
+          parsedRequest = message;
+        } else {
+          throw new Error('Invalid message format');
         }
-      } else if (message instanceof Buffer) {
-        try {
-          data = JSON.parse(message.toString());
-        } catch (e) {
-          logger.error(`Failed to parse buffer message from ${connectionId}:`, e);
-          this.sendError(connectionId, 'INVALID_MESSAGE', 'Message format invalid');
-          return;
+
+        if (!parsedRequest.id || !parsedRequest.method) {
+          throw new Error('Missing required fields');
         }
-      } else if (message && typeof message === 'object') {
-        data = message;
-      } else {
-        logger.error(`Invalid message format from ${connectionId}`);
-        this.sendError(connectionId, 'INVALID_MESSAGE', 'Message format invalid');
+      } catch (e) {
+        logger.error(`Failed to parse message from ${connectionId}:`, e);
+        this.sendError(connectionId, {
+          code: 'INVALID_MESSAGE',
+          message: 'Message format invalid'
+        });
         return;
       }
 
-      if (!data || typeof data.type !== 'string') {
-        logger.error(`Missing or invalid message type from ${connectionId}`);
-        this.sendError(connectionId, 'INVALID_MESSAGE', 'Message type missing or invalid');
-        return;
-      }
-      
-      logger.info(`Received message type ${data.type} from ${connectionId}`, {
-        messageType: data.type,
+      const request = parsedRequest; // Now TypeScript knows this is defined
+      logger.info(`Received request method ${request.method} from ${connectionId}`, {
+        method: request.method,
         connectionState: connection.state,
         hasTransport: !!connection.transport,
         hasProducer: !!connection.producer
       });
 
-      switch (data.type) {
-        case 'create-transport':
-          logger.info(`Creating WebRTC transport for ${connectionId}`);
+      let responseData: any;
+
+      switch (request.method) {
+        case 'createWebRtcTransport':
           if (!connection.router) {
-            this.sendError(connectionId, 'NO_ROUTER', 'Router not initialized');
-            return;
+            throw new Error('Router not initialized');
           }
 
-          try {
-            // If there's an existing transport, close it first
-            if (connection.transport) {
-              logger.info(`Closing existing transport for ${connectionId}`);
-              connection.transport.close();
-              connection.transportConnected = false;
-            }
-
-            connection.transport = await connection.router.createWebRtcTransport({
-              listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
-              enableUdp: true,
-              enableTcp: true,
-              preferUdp: true,
-              initialAvailableOutgoingBitrate: 800000
-            });
-
-            logger.info(`Transport created for ${connectionId}`, {
-              transportId: connection.transport.id,
-              iceState: connection.transport.iceState,
-              dtlsState: connection.transport.dtlsState
-            });
-
-            this.sendMessage(connectionId, {
-              type: 'transport-created',
-              transportId: connection.transport.id,
-              iceParameters: connection.transport.iceParameters,
-              iceCandidates: connection.transport.iceCandidates,
-              dtlsParameters: connection.transport.dtlsParameters
-            });
-          } catch (error) {
-            logger.error(`Failed to create transport for ${connectionId}:`, error);
-            this.sendError(connectionId, 'TRANSPORT_CREATE_ERROR', 'Failed to create transport');
+          // If there's an existing transport, close it first
+          if (connection.transport) {
+            logger.info(`Closing existing transport for ${connectionId}`);
+            connection.transport.close();
+            connection.transportConnected = false;
           }
+
+          connection.transport = await connection.router.createWebRtcTransport({
+            listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
+            enableUdp: true,
+            enableTcp: true,
+            preferUdp: true,
+            initialAvailableOutgoingBitrate: 800000
+          });
+
+          logger.info(`Transport created for ${connectionId}`, {
+            transportId: connection.transport.id,
+            iceState: connection.transport.iceState,
+            dtlsState: connection.transport.dtlsState
+          });
+
+          responseData = {
+            id: connection.transport.id,
+            iceParameters: connection.transport.iceParameters,
+            iceCandidates: connection.transport.iceCandidates,
+            dtlsParameters: connection.transport.dtlsParameters
+          };
           break;
 
-        case 'connect-transport':
+        case 'connectWebRtcTransport':
           if (!connection.transport) {
-            this.sendError(connectionId, 'NO_TRANSPORT', 'Transport not created');
-            return;
+            throw new Error('Transport not created');
           }
 
-          if (connection.transportConnected) {
-            logger.info(`Transport already connected for ${connectionId}, ignoring duplicate connect request`);
-            // Send success response to avoid client retries
-            this.sendMessage(connectionId, { type: 'transport-connected' });
-            return;
+          if (!request.data?.dtlsParameters) {
+            throw new Error('Missing DTLS parameters');
           }
 
-          if (!data.dtlsParameters) {
-            this.sendError(connectionId, 'INVALID_PARAMETERS', 'Missing DTLS parameters');
-            return;
-          }
+          await connection.transport.connect({ dtlsParameters: request.data.dtlsParameters });
+          connection.state = 'connected';
+          connection.connected = true;
+          connection.transportConnected = true;
 
-          try {
-            await connection.transport.connect({ dtlsParameters: data.dtlsParameters });
-            connection.state = 'connected';
-            connection.connected = true;
-            connection.transportConnected = true;
+          logger.info(`Transport connected for ${connectionId}`, {
+            iceState: connection.transport.iceState,
+            dtlsState: connection.transport.dtlsState
+          });
 
-            logger.info(`Transport connected for ${connectionId}`, {
-              iceState: connection.transport.iceState,
-              dtlsState: connection.transport.dtlsState
-            });
-
-            this.sendMessage(connectionId, { type: 'transport-connected' });
-            this.emit('connection:ready', connectionId);
-          } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'Failed to connect transport';
-            logger.error(`Failed to connect transport for ${connectionId}:`, error);
-            
-            // If the error is because transport is already connected, treat it as success
-            if (errorMessage.includes('connect() already called')) {
-              connection.transportConnected = true;
-              this.sendMessage(connectionId, { type: 'transport-connected' });
-            } else {
-              this.sendError(connectionId, 'TRANSPORT_CONNECT_ERROR', errorMessage);
-            }
-          }
+          responseData = { connected: true };
           break;
 
-        case 'create-producer':
+        case 'produce':
           if (!connection.transport) {
-            this.sendError(connectionId, 'NO_TRANSPORT', 'Transport not created');
-            return;
+            throw new Error('Transport not created');
           }
 
           if (!connection.connected) {
-            this.sendError(connectionId, 'TRANSPORT_NOT_CONNECTED', 'Transport not connected');
-            return;
+            throw new Error('Transport not connected');
           }
 
-          if (!data.rtpParameters) {
-            logger.error(`Missing RTP parameters in create-producer request from ${connectionId}`, {
-              messageData: data,
-              connectionState: connection.state,
-              transportState: connection.transport ? {
-                id: connection.transport.id,
-                closed: connection.transport.closed,
-                iceState: connection.transport.iceState,
-                dtlsState: connection.transport.dtlsState
-              } : 'no transport'
-            });
-            this.sendError(connectionId, 'INVALID_PARAMETERS', 'Missing RTP parameters');
-            return;
+          if (!request.data?.rtpParameters) {
+            throw new Error('Missing RTP parameters');
           }
 
-          // Validate RTP parameters structure
-          if (!data.rtpParameters.codecs || !Array.isArray(data.rtpParameters.codecs)) {
-            logger.error(`Invalid RTP parameters structure from ${connectionId}`, {
-              rtpParameters: data.rtpParameters
-            });
-            this.sendError(connectionId, 'INVALID_PARAMETERS', 'Invalid RTP parameters structure');
-            return;
-          }
-
-          try {
-            logger.info(`Creating producer for ${connectionId} with RTP parameters:`, {
-              codecs: data.rtpParameters.codecs,
-              encodings: data.rtpParameters.encodings,
-              headerExtensions: data.rtpParameters.headerExtensions
-            });
-
-            const producer = await connection.transport.produce({
-              kind: 'audio',
-              rtpParameters: data.rtpParameters
-            });
-
-            connection.producer = producer;
-
-            logger.info(`Audio producer created for ${connectionId}:`, {
-              id: producer.id,
-              kind: producer.kind,
-              type: producer.type,
-              paused: producer.paused,
-              score: producer.score,
-              rtpParameters: producer.rtpParameters
-            });
-
-            producer.observer.on('score', (score) => {
-              logger.debug(`Producer score for ${connectionId}:`, score);
-            });
-
-            producer.observer.on('close', () => {
-              logger.info(`Producer closed for ${connectionId}`);
-              connection.producer = undefined;
-            });
-
-            this.sendMessage(connectionId, {
-              type: 'producer-created',
-              producerId: producer.id
-            });
-
-            this.emit('stream', connectionId, producer);
-          } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'Failed to create producer';
-            logger.error(`Failed to create producer for ${connectionId}:`, {
-              error: errorMessage,
-              rtpParameters: data.rtpParameters
-            });
-            this.sendError(connectionId, 'PRODUCE_ERROR', errorMessage);
-          }
-          break;
-
-        case 'start-listening':
-          if (!connection.producer) {
-            this.sendError(connectionId, 'NO_PRODUCER', 'Producer not created');
-            return;
-          }
-
-          logger.info(`Start listening request from ${connectionId}`, {
-            commandId: data.commandId,
-            debug: data.debug
+          const producer = await connection.transport.produce({
+            kind: 'audio',
+            rtpParameters: request.data.rtpParameters
           });
-          
-          this.sendMessage(connectionId, {
-            type: 'listening-started',
-            commandId: data.commandId
+
+          connection.producer = producer;
+
+          logger.info(`Audio producer created for ${connectionId}:`, {
+            id: producer.id,
+            kind: producer.kind,
+            type: producer.type,
+            paused: producer.paused,
+            score: producer.score,
+            rtpParameters: producer.rtpParameters
           });
+
+          producer.observer.on('score', (score) => {
+            logger.debug(`Producer score for ${connectionId}:`, score);
+          });
+
+          producer.observer.on('close', () => {
+            logger.info(`Producer closed for ${connectionId}`);
+            connection.producer = undefined;
+          });
+
+          responseData = { id: producer.id };
+          this.emit('stream', connectionId, producer);
           break;
 
         default:
-          logger.debug(`Unhandled message type: ${data.type} from ${connectionId}`);
-          logger.debug('Full message:', data);
-          break;
+          throw new Error(`Unknown method: ${request.method}`);
       }
+
+      // Send success response
+      this.sendResponse(connectionId, {
+        response: true,
+        id: request.id,
+        ok: true,
+        data: responseData
+      });
+
     } catch (error) {
       logger.error(`Error processing message from ${connectionId}:`, error);
-      this.sendError(connectionId, 'MESSAGE_ERROR', error instanceof Error ? error.message : 'Failed to process message');
+      this.sendError(connectionId, {
+        code: 'REQUEST_FAILED',
+        message: error instanceof Error ? error.message : 'Failed to process request'
+      }, parsedRequest?.id);
     }
   }
 
@@ -463,13 +415,25 @@ export class WebRTCService extends EventEmitter {
   /**
    * Send an error message to a connection
    */
-  public sendError(connectionId: string, code: string, message: string): void {
-    logger.warn(`Sending error to ${connectionId}: ${code} - ${message}`);
-    this.sendMessage(connectionId, {
-      type: 'error',
-      error: { code, message }
-    });
-    this.emit('error', connectionId, code, message);
+  public sendError(connectionId: string, error: { code: string | number, message: string }, requestId?: number): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection || connection.state === 'closed') return;
+
+    try {
+      const errorResponse: ErrorResponse = {
+        response: true,
+        id: requestId || 0,
+        ok: false,
+        error: {
+          code: typeof error.code === 'string' ? 500 : error.code,
+          message: error.message
+        }
+      };
+      connection.ws.send(JSON.stringify(errorResponse));
+      this.emit('error', connectionId, String(error.code), error.message);
+    } catch (err) {
+      logger.error(`Error sending error to ${connectionId}:`, err);
+    }
   }
 
   /**
@@ -490,5 +454,32 @@ export class WebRTCService extends EventEmitter {
         { urls: 'stun:stun1.l.google.com:19302' }
       ]
     };
+  }
+
+  private sendResponse(connectionId: string, response: Response): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection || connection.state === 'closed') return;
+
+    try {
+      connection.ws.send(JSON.stringify(response));
+    } catch (error) {
+      logger.error(`Error sending response to ${connectionId}:`, error);
+    }
+  }
+
+  private sendNotification(connectionId: string, method: string, data?: any): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection || connection.state === 'closed') return;
+
+    try {
+      const notification: Notification = {
+        notification: true,
+        method,
+        data
+      };
+      connection.ws.send(JSON.stringify(notification));
+    } catch (error) {
+      logger.error(`Error sending notification to ${connectionId}:`, error);
+    }
   }
 } 
