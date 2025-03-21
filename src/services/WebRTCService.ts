@@ -167,8 +167,37 @@ export class WebRTCService extends EventEmitter {
     connection.lastActivity = Date.now();
 
     try {
-      // Ensure message is parsed if it's a string
-      const data = typeof message === 'string' ? JSON.parse(message) : message;
+      // Ensure proper parsing of WebSocket messages
+      let data: any;
+      if (typeof message === 'string') {
+        try {
+          data = JSON.parse(message);
+        } catch (e) {
+          logger.error(`Failed to parse message from ${connectionId}:`, e);
+          this.sendError(connectionId, 'INVALID_MESSAGE', 'Message format invalid');
+          return;
+        }
+      } else if (message instanceof Buffer) {
+        try {
+          data = JSON.parse(message.toString());
+        } catch (e) {
+          logger.error(`Failed to parse buffer message from ${connectionId}:`, e);
+          this.sendError(connectionId, 'INVALID_MESSAGE', 'Message format invalid');
+          return;
+        }
+      } else if (message && typeof message === 'object') {
+        data = message;
+      } else {
+        logger.error(`Invalid message format from ${connectionId}`);
+        this.sendError(connectionId, 'INVALID_MESSAGE', 'Message format invalid');
+        return;
+      }
+
+      if (!data || typeof data.type !== 'string') {
+        logger.error(`Missing or invalid message type from ${connectionId}`);
+        this.sendError(connectionId, 'INVALID_MESSAGE', 'Message type missing or invalid');
+        return;
+      }
       
       logger.info(`Received message type ${data.type} from ${connectionId}`, {
         messageType: data.type,
