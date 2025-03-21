@@ -199,7 +199,7 @@ export class WebRTCService extends EventEmitter {
             // Log transport creation
             logger.info(`Transport created for ${connectionId}`, {
               transportId: connection.transport.id,
-              iceState: connection.transport.iceConnectionState,
+              iceState: connection.transport.iceState,
               dtlsState: connection.transport.dtlsState
             });
 
@@ -230,7 +230,7 @@ export class WebRTCService extends EventEmitter {
             connection.connected = true;
 
             logger.info(`Transport connected for ${connectionId}`, {
-              iceState: connection.transport.iceConnectionState,
+              iceState: connection.transport.iceState,
               dtlsState: connection.transport.dtlsState
             });
 
