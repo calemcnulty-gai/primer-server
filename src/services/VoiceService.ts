@@ -20,6 +20,7 @@ interface RTCConnection {
   messagesReceived: number; // Track number of messages received
   messagesSent: number; // Track number of messages sent
   statsInterval?: NodeJS.Timeout; // Interval for logging connection stats
+  processingTimeout?: NodeJS.Timeout; // Timeout for processing audio
 }
 
 export class VoiceService extends EventEmitter {
@@ -406,6 +407,9 @@ export class VoiceService extends EventEmitter {
       return;
     }
     
+    // Debug the audio data to see its format
+    logger.info(`📊 AUDIO DATA RECEIVED: ${audioChunk.length} bytes, first few bytes: ${audioChunk.slice(0, 16).toString('hex')}`);
+    
     // Store the audio chunk
     connection.audioBuffer.push(audioChunk);
     
@@ -423,13 +427,37 @@ export class VoiceService extends EventEmitter {
         connection.state = 'connected';
         logger.info(`Updated connection state to 'connected' after receiving first audio chunk for ${connectionId}`);
       }
+      
+      // Set a timeout to force processing after a brief silence period
+      setTimeout(() => {
+        if (connection.isListening && connection.audioBuffer.length > 0) {
+          logger.info(`Processing audio due to silence timeout for ${connectionId}`);
+          this.stopListening(connectionId);
+        }
+      }, 1500); // Process after 1.5 seconds of silence
     }
     
-    // Check if we've received enough audio to process (at least 500KB or 5 seconds worth)
+    // Check if we've received enough audio to process
     const totalSize = connection.audioBuffer.reduce((sum, buffer) => sum + buffer.length, 0);
-    if (totalSize > 50000) {
-      logger.info(`Collected ${totalSize} bytes of audio data, stopping listening to process.`);
+    logger.info(`📊 Current audio buffer size: ${totalSize} bytes from ${connection.audioBuffer.length} chunks for ${connectionId}`);
+    
+    // Process if we've received more than 8KB
+    if (totalSize > 8000) {
+      logger.info(`📊 Collected ${totalSize} bytes of audio data, stopping listening to process for ${connectionId}`);
       this.stopListening(connectionId);
+    }
+    
+    // Also set a timeout to restart listening after processing is complete
+    if (!connection.processingTimeout) {
+      connection.processingTimeout = setTimeout(() => {
+        // Clear the timeout reference
+        connection.processingTimeout = undefined;
+        
+        if (connection.audioBuffer.length > 0) {
+          logger.info(`Processing audio due to collection timeout for ${connectionId}`);
+          this.stopListening(connectionId);
+        }
+      }, 3000); // Maximum of 3 seconds of collection
     }
   }
 
@@ -461,6 +489,52 @@ export class VoiceService extends EventEmitter {
     
     // Log connection state after updating
     logger.info(`Connection ${connectionId} now listening (state=${connection.state}, isListening=${connection.isListening})`);
+    
+    // After a delay, force a test response if no audio was received
+    setTimeout(() => {
+      this.checkForAudioActivity(connectionId);
+    }, 5000); // Wait 5 seconds
+  }
+  
+  /**
+   * Check if we've received any audio data, and if not, send a test response
+   */
+  private checkForAudioActivity(connectionId: string): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection || !connection.isListening) {
+      return;
+    }
+    
+    // If we haven't received any audio data yet, force a test response
+    if (connection.totalAudioReceived === 0) {
+      logger.info(`No audio received after listening started for ${connectionId}, sending test response`);
+      
+      // First stop listening to prevent conflicts
+      connection.isListening = false;
+      
+      // Generate a test response 
+      this.sendMessage(connectionId, { type: 'speaking-start' });
+      
+      // Use CartesiaService to generate a test response
+      this.cartesiaService.textToSpeech("Hello! I'm testing the voice connection. Can you hear me? Please say something.")
+        .then(audioResponse => {
+          logger.info(`Generated test audio response of ${audioResponse.length} bytes`);
+          return this.sendAudioToClient(connectionId, audioResponse);
+        })
+        .then(() => {
+          this.sendMessage(connectionId, { type: 'speaking-end' });
+          
+          // Resume listening
+          connection.isListening = true;
+          logger.info(`Resumed listening for ${connectionId} after test response`);
+        })
+        .catch(error => {
+          logger.error(`Error sending test audio to ${connectionId}:`, error);
+          
+          // Resume listening even if there was an error
+          connection.isListening = true;
+        });
+    }
   }
 
   /**
@@ -478,6 +552,12 @@ export class VoiceService extends EventEmitter {
       logger.debug(`Not currently listening for connection ${connectionId}`);
       this.sendMessage(connectionId, { type: 'listening-stopped' });
       return;
+    }
+
+    // Clear any processing timeouts
+    if (connection.processingTimeout) {
+      clearTimeout(connection.processingTimeout);
+      connection.processingTimeout = undefined;
     }
 
     connection.isListening = false;
@@ -551,7 +631,29 @@ export class VoiceService extends EventEmitter {
       }
       
       // Log audio format information
-      logger.info(`Audio data format: ${audioData.length} bytes for connection ${connectionId}`);
+      logger.info(`📊 PROCESSING AUDIO: ${audioData.length} bytes, first few bytes: ${audioData.slice(0, 16).toString('hex')}`);
+
+      // Force using a test audio for debugging if real audio is not being received
+      if (audioData.length < 1000) {
+        logger.warn(`Audio data may be too small (${audioData.length} bytes). Using test phrase.`);
+        
+        // Create a test response
+        const testResponse = "This is a test response. I'm echoing back what I heard.";
+        
+        // Send the test response to TTS
+        logger.info(`Using test response for connection ${connectionId}: "${testResponse}"`);
+        this.sendMessage(connectionId, { type: 'speaking-start' });
+        
+        const startTts = Date.now();
+        const audioResponse = await this.cartesiaService.textToSpeech(testResponse);
+        const ttsDuration = Date.now() - startTts;
+        
+        logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
+        
+        // Send audio to client
+        await this.sendAudioToClient(connectionId, audioResponse);
+        return;
+      }
       
       // Step 1: Speech-to-text with Deepgram
       logger.info(`🎤→📝 Calling Deepgram STT service for connection ${connectionId}`);
@@ -560,6 +662,8 @@ export class VoiceService extends EventEmitter {
       try {
         const transcribedText = await this.deepgramService.transcribeAudio(audioData);
         const sttDuration = Date.now() - startStt;
+        
+        logger.info(`✅ STT result: "${transcribedText || 'EMPTY'}" for connection ${connectionId}`);
         
         if (!transcribedText || transcribedText.trim() === '') {
           logger.warn(`Empty transcription result for connection ${connectionId}`);
@@ -604,7 +708,7 @@ export class VoiceService extends EventEmitter {
             return;
           }
           
-          logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
+          logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes, first few bytes: ${audioResponse.slice(0, 16).toString('hex')}`);
           
           // Step 3: Send audio back to client
           logger.info(`🔊→📱 Sending ${audioResponse.length} bytes of audio back to connection ${connectionId}`);
