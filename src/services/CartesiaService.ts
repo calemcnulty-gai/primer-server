@@ -41,7 +41,9 @@ export class CartesiaService {
         throw new Error('Cartesia API key not configured');
       }
 
-      logger.info(`Converting text to speech: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+      const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+      const startTime = new Date();
+      logger.info(`[${requestId}] [${startTime.toISOString()}] Converting text to speech: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
       
       // Create TTS request using the SDK
       const audioArrayBuffer = await this.client.tts.bytes({
@@ -59,12 +61,15 @@ export class CartesiaService {
         language: 'en'
       });
       
-      logger.info('Successfully converted text to speech');
+      const endTime = new Date();
+      const duration = endTime.getTime() - startTime.getTime();
+      logger.info(`[${requestId}] [${endTime.toISOString()}] Successfully converted text to speech in ${duration}ms, audio size: ${audioArrayBuffer.byteLength} bytes`);
       
       // Convert ArrayBuffer to Buffer
       return Buffer.from(audioArrayBuffer);
     } catch (error) {
-      logger.error('Error converting text to speech:', error);
+      const errorTime = new Date();
+      logger.error(`[${errorTime.toISOString()}] Error converting text to speech:`, error);
       throw new Error(`Text-to-speech failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }

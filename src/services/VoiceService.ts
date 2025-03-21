@@ -199,61 +199,63 @@ export class VoiceService extends EventEmitter {
   private handleWebSocketMessage(connectionId: string, message: string): void {
     const connection = this.connections.get(connectionId);
     if (!connection) {
-      logger.warn(`Received message for unknown connection: ${connectionId}`);
+      logger.warn(`[${new Date().toISOString()}] Received message for unknown connection: ${connectionId}`);
       try {
         this.sendError(connectionId, 'CONNECTION_NOT_FOUND', 'Connection needs to be re-established');
       } catch (e) {
-        logger.error(`Failed to send error for unknown connection ${connectionId}:`, e);
+        logger.error(`[${new Date().toISOString()}] Failed to send error for unknown connection ${connectionId}:`, e);
       }
       return;
     }
 
     try {
+      const msgTime = new Date().toISOString();
       const data = JSON.parse(message);
-      logger.info(`📥 Received ${data.type} message from connection ${connectionId}`);
+      logger.info(`[${msgTime}] 📥 Received ${data.type} message from connection ${connectionId}`);
       
       // Log raw message content for debugging
-      logger.debug(`Message content: ${JSON.stringify(data).substring(0, 200)}${JSON.stringify(data).length > 200 ? '...' : ''}`);
+      logger.debug(`[${msgTime}] Message content: ${JSON.stringify(data).substring(0, 200)}${JSON.stringify(data).length > 200 ? '...' : ''}`);
       
       switch (data.type) {
         case 'offer':
-          logger.info(`Processing offer from ${connectionId} (connection state: ${connection.state})`);
+          logger.info(`[${msgTime}] Processing offer from ${connectionId} (connection state: ${connection.state})`);
           this.handleRTCOffer(connectionId, data);
           break;
           
         case 'ice-candidate':
-          logger.info(`Processing ICE candidate from ${connectionId} (connection state: ${connection.state})`);
+          logger.info(`[${msgTime}] Processing ICE candidate from ${connectionId} (connection state: ${connection.state})`);
           this.handleICECandidate(connectionId, data);
           break;
           
         case 'start-listening':
-          logger.info(`Processing start-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
+          logger.info(`[${msgTime}] Processing start-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
           this.startListening(connectionId);
           break;
           
         case 'stop-listening':
-          logger.info(`Processing stop-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
+          logger.info(`[${msgTime}] Processing stop-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
           this.stopListening(connectionId);
           break;
           
         case 'heartbeat':
           // Handle heartbeat messages to keep the connection alive
-          logger.debug(`Received heartbeat from ${connectionId}`);
+          logger.debug(`[${msgTime}] Received heartbeat from ${connectionId}`);
           this.sendMessage(connectionId, { type: 'heartbeat-ack' });
           break;
           
         case 'ping':
           // Handle ping messages from client (alternative heartbeat mechanism)
-          logger.debug(`Received ping from ${connectionId}`);
+          logger.debug(`[${msgTime}] Received ping from ${connectionId}`);
           this.sendMessage(connectionId, { type: 'pong' });
           break;
           
         default:
-          logger.warn(`Unknown message type: ${data.type} from connection ${connectionId}`);
+          logger.warn(`[${msgTime}] Unknown message type: ${data.type} from connection ${connectionId}`);
       }
     } catch (error) {
-      logger.error(`Error processing message from connection ${connectionId}:`, error);
-      logger.error(`Raw message content: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`);
+      const errorTime = new Date().toISOString();
+      logger.error(`[${errorTime}] Error processing message from connection ${connectionId}:`, error);
+      logger.error(`[${errorTime}] Raw message content: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`);
       this.sendError(connectionId, 'INTERNAL_ERROR', 'Error processing message');
     }
   }
@@ -767,7 +769,9 @@ export class VoiceService extends EventEmitter {
     }
     
     try {
-      logger.info(`Attempting to send ${audioData.length} bytes of audio to ${connectionId}`);
+      const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+      const startTime = new Date();
+      logger.info(`[${requestId}] [${startTime.toISOString()}] Attempting to send ${audioData.length} bytes of audio to ${connectionId}`);
       
       let success = false;
       
@@ -775,7 +779,7 @@ export class VoiceService extends EventEmitter {
       if (connection.peer && connection.peer.connected) {
         try {
           // If we have a connected WebRTC peer, send the audio through the data channel
-          logger.info(`Sending audio via WebRTC data channel to ${connectionId}`);
+          logger.info(`[${requestId}] [${new Date().toISOString()}] Sending audio via WebRTC data channel to ${connectionId}`);
           
           // Send audio in chunks if it's large to avoid buffer overflows
           const CHUNK_SIZE = 16000; // 16KB chunks
@@ -787,12 +791,12 @@ export class VoiceService extends EventEmitter {
             chunksSent++;
           }
           
-          logger.info(`Audio data sent via WebRTC to ${connectionId} in ${chunksSent} chunks`);
+          logger.info(`[${requestId}] [${new Date().toISOString()}] Audio data sent via WebRTC to ${connectionId} in ${chunksSent} chunks`);
           success = true;
         } catch (webrtcError) {
-          logger.error(`Failed to send audio via WebRTC to ${connectionId}:`, webrtcError);
+          logger.error(`[${requestId}] [${new Date().toISOString()}] Failed to send audio via WebRTC to ${connectionId}:`, webrtcError);
           // Fall back to WebSocket if WebRTC fails
-          logger.info(`Falling back to WebSocket for audio delivery to ${connectionId}`);
+          logger.info(`[${requestId}] [${new Date().toISOString()}] Falling back to WebSocket for audio delivery to ${connectionId}`);
         }
       }
       
@@ -800,7 +804,7 @@ export class VoiceService extends EventEmitter {
       if (!success && connection.ws.readyState === 1) { // 1 = OPEN
         try {
           // Fallback to WebSocket for audio
-          logger.info(`Sending audio via WebSocket to ${connectionId}`);
+          logger.info(`[${requestId}] [${new Date().toISOString()}] Sending audio via WebSocket to ${connectionId}`);
           
           // Send audio in chunks over websocket as well to avoid large packet issues
           const CHUNK_SIZE = 16000; // 16KB chunks
@@ -823,14 +827,14 @@ export class VoiceService extends EventEmitter {
             chunksSent++;
           }
           
-          logger.info(`Successfully sent ${audioData.length} bytes of audio in ${chunksSent} chunks via WebSocket to ${connectionId}`);
+          logger.info(`[${requestId}] [${new Date().toISOString()}] Successfully sent ${audioData.length} bytes of audio in ${chunksSent} chunks via WebSocket to ${connectionId}`);
           success = true;
         } catch (wsError) {
-          logger.error(`Failed to send audio via WebSocket to ${connectionId}:`, wsError);
+          logger.error(`[${requestId}] [${new Date().toISOString()}] Failed to send audio via WebSocket to ${connectionId}:`, wsError);
           throw new Error(`All audio delivery methods failed: ${wsError.message}`);
         }
       } else if (!success) {
-        logger.error(`Cannot send audio to ${connectionId}: WebRTC unavailable and WebSocket not in OPEN state (state: ${connection.ws.readyState})`);
+        logger.error(`[${requestId}] [${new Date().toISOString()}] Cannot send audio to ${connectionId}: WebRTC unavailable and WebSocket not in OPEN state (state: ${connection.ws.readyState})`);
         throw new Error('All audio delivery methods unavailable');
       }
       
@@ -838,10 +842,12 @@ export class VoiceService extends EventEmitter {
       await new Promise(resolve => setTimeout(resolve, 100));
       
       // Send speaking-end notification when audio is sent
-      logger.info(`✅ Audio sent to client ${connectionId}`);
+      const endTime = new Date();
+      const duration = endTime.getTime() - startTime.getTime();
+      logger.info(`[${requestId}] [${endTime.toISOString()}] ✅ Audio sent to client ${connectionId} in ${duration}ms`);
       this.sendMessage(connectionId, { type: 'speaking-end' });
     } catch (error) {
-      logger.error(`🔴 Failed to send audio to client ${connectionId}:`, error);
+      logger.error(`[${new Date().toISOString()}] 🔴 Failed to send audio to client ${connectionId}:`, error);
       this.sendError(connectionId, 'AUDIO_TRANSMISSION_FAILED', 'Failed to send audio response');
     }
   }
@@ -882,16 +888,17 @@ export class VoiceService extends EventEmitter {
   private sendMessage(connectionId: string, message: any): void {
     const connection = this.connections.get(connectionId);
     if (!connection || connection.state === 'closed') {
-      logger.warn(`Cannot send message to closed/missing connection: ${connectionId}`);
+      logger.warn(`[${new Date().toISOString()}] Cannot send message to closed/missing connection: ${connectionId}`);
       return;
     }
 
     try {
+      const msgTime = new Date().toISOString();
       connection.ws.send(JSON.stringify(message));
       connection.messagesSent++;
-      logger.debug(`📤 Sent message #${connection.messagesSent} to connection ${connectionId}: ${message.type}`);
+      logger.debug(`[${msgTime}] 📤 Sent message #${connection.messagesSent} to connection ${connectionId}: ${message.type}`);
     } catch (error) {
-      logger.error(`🔴 Error sending message to connection ${connectionId}:`, error);
+      logger.error(`[${new Date().toISOString()}] 🔴 Error sending message to connection ${connectionId}:`, error);
     }
   }
 
@@ -899,7 +906,7 @@ export class VoiceService extends EventEmitter {
    * Send an error message to a connection
    */
   private sendError(connectionId: string, code: string, message: string): void {
-    logger.warn(`⚠️ Sending error to connection ${connectionId}: [${code}] ${message}`);
+    logger.warn(`[${new Date().toISOString()}] Sending error to ${connectionId}: ${code} - ${message}`);
     this.sendMessage(connectionId, {
       type: 'error',
       error: {
