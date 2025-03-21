@@ -178,15 +178,50 @@ export class VoiceService extends EventEmitter {
         // Store the command ID for response tracking
         const commandId = message.commandId || Date.now().toString(36);
         
-        // Validate WebRTC state before starting
+        // Get WebRTC state
         const peerConnection = this.webrtcService.getPeerConnection(connectionId);
-        if (!peerConnection || peerConnection.connectionState !== 'connected') {
-          logger.error(`Cannot start listening - WebRTC not connected for ${connectionId}`);
+        const peerState = peerConnection?.connectionState || 'unknown';
+        const iceState = peerConnection?.iceConnectionState || 'unknown';
+        
+        // More lenient connection check - if we have a peer connection and it's in a valid state
+        const hasValidConnectionState = peerConnection && (
+          peerState === 'connected' || 
+          peerState === 'connecting' ||
+          iceState === 'checking' || 
+          iceState === 'connected' || 
+          iceState === 'completed'
+        );
+
+        if (!peerConnection) {
+          logger.error(`Cannot start listening - No WebRTC peer connection for ${connectionId}`);
           this.webrtcService.sendMessage(connectionId, { 
             type: 'listening-started',
             commandId: commandId,
-            error: 'WebRTC connection not ready'
+            error: 'No WebRTC peer connection'
           });
+          return;
+        }
+
+        // If connection is still establishing, wait briefly and retry
+        if (!hasValidConnectionState && (peerState === 'new' || iceState === 'new')) {
+          logger.info(`WebRTC connection still establishing for ${connectionId}, waiting briefly...`);
+          setTimeout(() => {
+            // Recheck connection state
+            const currentState = peerConnection.connectionState;
+            const currentIceState = peerConnection.iceConnectionState;
+            
+            if (currentState === 'connected' || currentIceState === 'connected' || currentIceState === 'completed') {
+              logger.info(`WebRTC connection now ready for ${connectionId}, starting to listen`);
+              this.startListeningWithResponse(connectionId, commandId);
+            } else {
+              logger.error(`WebRTC connection still not ready for ${connectionId} after waiting`);
+              this.webrtcService.sendMessage(connectionId, { 
+                type: 'listening-started',
+                commandId: commandId,
+                error: 'WebRTC connection not ready'
+              });
+            }
+          }, 500); // Wait 500ms for connection to establish
           return;
         }
         
@@ -196,34 +231,8 @@ export class VoiceService extends EventEmitter {
           this.stopListening(connectionId);
         }
         
-        // Start listening and get the result
-        const started = this.startListening(connectionId);
-        
-        // Only send success if we actually started listening
-        if (started) {
-          logger.info(`Successfully started listening for ${connectionId}`);
-          this.webrtcService.sendMessage(connectionId, { 
-            type: 'listening-started',
-            commandId: commandId
-          });
-        } else {
-          logger.error(`Failed to start listening for ${connectionId}`);
-          this.webrtcService.sendMessage(connectionId, { 
-            type: 'listening-started',
-            commandId: commandId,
-            error: 'Failed to start listening'
-          });
-        }
-        
-        // Debug logging for WebRTC state after start-listening
-        logger.debug('WebRTC state after start-listening:', {
-          connectionId: connectionId, 
-          webrtcConnected: this.webrtcService.isConnected(connectionId),
-          peerConnectionState: peerConnection?.connectionState || 'unknown',
-          iceConnectionState: peerConnection?.iceConnectionState || 'unknown',
-          audioTracks: peerConnection?.getReceivers().filter(r => r.track?.kind === 'audio').length || 0,
-          sessionListening: session.isListening
-        });
+        // Start listening
+        this.startListeningWithResponse(connectionId, commandId);
         break;
         
       case 'stop-listening':
@@ -234,6 +243,39 @@ export class VoiceService extends EventEmitter {
         logger.debug(`Unhandled message type: ${message.type} from ${connectionId}`);
         break;
     }
+  }
+
+  /**
+   * Helper to start listening and send appropriate response
+   */
+  private startListeningWithResponse(connectionId: string, commandId: string): void {
+    const started = this.startListening(connectionId);
+    
+    if (started) {
+      logger.info(`Successfully started listening for ${connectionId}`);
+      this.webrtcService.sendMessage(connectionId, { 
+        type: 'listening-started',
+        commandId: commandId
+      });
+    } else {
+      logger.error(`Failed to start listening for ${connectionId}`);
+      this.webrtcService.sendMessage(connectionId, { 
+        type: 'listening-started',
+        commandId: commandId,
+        error: 'Failed to start listening'
+      });
+    }
+    
+    // Debug logging for WebRTC state after start-listening
+    const peerConnection = this.webrtcService.getPeerConnection(connectionId);
+    logger.debug('WebRTC state after start-listening:', {
+      connectionId: connectionId, 
+      webrtcConnected: this.webrtcService.isConnected(connectionId),
+      peerConnectionState: peerConnection?.connectionState || 'unknown',
+      iceConnectionState: peerConnection?.iceConnectionState || 'unknown',
+      audioTracks: peerConnection?.getReceivers().filter(r => r.track?.kind === 'audio').length || 0,
+      sessionListening: this.sessions.get(connectionId)?.isListening
+    });
   }
 
   /**
