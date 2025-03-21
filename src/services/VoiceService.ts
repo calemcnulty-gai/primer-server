@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import * as SimplePeer from 'simple-peer';
+import SimplePeer from 'simple-peer';
 import * as wav from 'node-wav';
 import { DeepgramService } from './DeepgramService';
 import { GeminiService } from './GeminiService';
@@ -11,7 +11,7 @@ const logger = createLogger('VoiceService');
 // Interface for WebRTC connection
 interface RTCConnection {
   ws: any; // WebSocket connection
-  peer?: SimplePeer.Instance; // Simple-peer instance
+  peer?: any; // Simple-peer instance
   state: 'new' | 'connecting' | 'connected' | 'failed' | 'closed';
   isListening: boolean;
   lastActivity: number;
@@ -267,10 +267,14 @@ export class VoiceService extends EventEmitter {
       connection.state = 'connecting';
       logger.debug(`Changed connection state to 'connecting' for ${connectionId}`);
       
-      // Create a SimplePeer instance in answer mode
+      // Create a new peer connection
+      logger.info(`Creating new peer connection for ${connectionId}`);
       const peer = new SimplePeer({
+        initiator: false,
         trickle: true,
-        config: { iceServers: this.iceServers }
+        config: {
+          iceServers: this.iceServers
+        }
       });
       
       // Store the peer instance
