@@ -518,12 +518,18 @@ export class VoiceService extends EventEmitter {
       this.sendMessage(connectionId, { type: 'speaking-start' });
       
       // Use CartesiaService to generate a test response
+      logger.info(`[TEST_AUDIO] Requesting test audio from CartesiaService for ${connectionId}`);
       this.cartesiaService.textToSpeech("Hello! I'm testing the voice connection. Can you hear me? Please say something.")
         .then(audioResponse => {
-          logger.info(`Generated test audio response of ${audioResponse.length} bytes`);
+          logger.info(`[TEST_AUDIO] Generated test audio response of ${audioResponse.length} bytes, format: raw PCM`);
+          
+          // Debug first few bytes to check format
+          logger.info(`[TEST_AUDIO] First 20 bytes: ${audioResponse.slice(0, 20).toString('hex')}`);
+          
           return this.sendAudioToClient(connectionId, audioResponse);
         })
         .then(() => {
+          logger.info(`[TEST_AUDIO] Successfully sent test audio to client ${connectionId}`);
           this.sendMessage(connectionId, { type: 'speaking-end' });
           
           // Resume listening
@@ -531,10 +537,20 @@ export class VoiceService extends EventEmitter {
           logger.info(`Resumed listening for ${connectionId} after test response`);
         })
         .catch(error => {
-          logger.error(`Error sending test audio to ${connectionId}:`, error);
+          logger.error(`[TEST_AUDIO] ERROR sending test audio to ${connectionId}:`, error);
+          logger.error(`[TEST_AUDIO] Error type: ${typeof error}, message: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          
+          // Log the stack trace if available
+          if (error instanceof Error && error.stack) {
+            logger.error(`[TEST_AUDIO] Stack trace: ${error.stack}`);
+          }
           
           // Resume listening even if there was an error
           connection.isListening = true;
+          logger.error(`[TEST_AUDIO] Resumed listening for ${connectionId} despite error`);
+          
+          // Notify the client that there was an issue
+          this.sendError(connectionId, 'AUDIO_ERROR', 'Failed to generate test audio response');
         });
     }
   }
@@ -1009,6 +1025,15 @@ export class VoiceService extends EventEmitter {
       const startTime = new Date();
       logger.info(`[${requestId}] [${startTime.toISOString()}] Attempting to send ${audioData.length} bytes of audio to ${connectionId}`);
       
+      // Check if the audio buffer is empty or extremely small
+      if (!audioData || audioData.length < 100) {
+        logger.error(`[${requestId}] Audio data is too small or empty: ${audioData ? audioData.length : 0} bytes`);
+        throw new Error('Audio data is too small or empty');
+      }
+      
+      // Log audio format details (first bytes) to help debug format issues
+      logger.info(`[${requestId}] Audio format details - first 20 bytes: ${audioData.slice(0, 20).toString('hex')}`);
+      
       let success = false;
       
       // First try WebRTC for better performance if it's available and connected
@@ -1084,6 +1109,10 @@ export class VoiceService extends EventEmitter {
       this.sendMessage(connectionId, { type: 'speaking-end' });
     } catch (error) {
       logger.error(`[${new Date().toISOString()}] 🔴 Failed to send audio to client ${connectionId}:`, error);
+      logger.error(`[${new Date().toISOString()}] Error type: ${typeof error}, message: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (error instanceof Error && error.stack) {
+        logger.error(`[${new Date().toISOString()}] Stack trace: ${error.stack}`);
+      }
       this.sendError(connectionId, 'AUDIO_TRANSMISSION_FAILED', 'Failed to send audio response');
     }
   }

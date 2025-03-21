@@ -72,6 +72,15 @@ export class CartesiaService extends EventEmitter {
       const startTime = new Date();
       logger.info(`[${requestId}] Converting text to speech: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
       
+      // Use raw PCM format to match streaming - this is important for client compatibility!
+      const outputFormat = {
+        container: 'raw',
+        encoding: 'pcm_s16le',
+        sampleRate: 16000 // Match client-side expectation: 16kHz
+      };
+      
+      logger.info(`[${requestId}] Requesting TTS with format: ${JSON.stringify(outputFormat)}`);
+      
       // Create TTS request using the SDK with raw PCM format to match streaming
       const audioArrayBuffer = await this.client.tts.bytes({
         modelId: this.modelId,
@@ -80,11 +89,7 @@ export class CartesiaService extends EventEmitter {
           mode: 'id',
           id: this.defaultVoiceId
         },
-        outputFormat: {
-          container: 'raw',
-          encoding: 'pcm_s16le',
-          sampleRate: 16000 // Match client-side expectation: 16kHz
-        },
+        outputFormat,
         language: 'en'
       });
       
@@ -92,20 +97,26 @@ export class CartesiaService extends EventEmitter {
       const duration = endTime.getTime() - startTime.getTime();
       const buffer = Buffer.from(audioArrayBuffer);
       
-      // Log essential audio metadata
-      this.logAudioMetadata(buffer, {
-        container: 'raw',
-        encoding: 'pcm_s16le',
-        sampleRate: 16000
-      });
+      // Log detailed audio metadata for debugging
+      const bytesPerSample = outputFormat.encoding === 'pcm_f32le' ? 4 : 2;
+      const samplesCount = buffer.length / bytesPerSample;
+      const durationMs = (samplesCount / outputFormat.sampleRate) * 1000;
       
-      logger.info(`[${requestId}] Successfully converted text to speech in ${duration}ms, audio size: ${buffer.length} bytes`);
+      logger.info(`[${requestId}] Audio metadata: Format=${outputFormat.container}, Encoding=${outputFormat.encoding}, SampleRate=${outputFormat.sampleRate}Hz`);
+      logger.info(`[${requestId}] Audio size: ${buffer.length} bytes, Samples: ${samplesCount}, Duration: ${durationMs.toFixed(0)}ms`);
+      logger.info(`[${requestId}] First 20 bytes: ${buffer.slice(0, 20).toString('hex')}`);
       
-      // Convert ArrayBuffer to Buffer
+      logger.info(`[${requestId}] Successfully converted text to speech in ${duration}ms`);
+      
+      // Return the PCM buffer
       return buffer;
     } catch (error) {
       const errorTime = new Date();
       logger.error('Error converting text to speech:', error);
+      logger.error(`Error details: ${error instanceof Error ? error.message : String(error)}`);
+      if (error instanceof Error && error.stack) {
+        logger.error(`Stack trace: ${error.stack}`);
+      }
       throw new Error(`Text-to-speech failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
