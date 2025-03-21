@@ -143,6 +143,13 @@ export class VoiceService extends EventEmitter {
           this.handleAudioData(connectionId, message);
         } else {
           logger.debug(`Received binary data but not listening yet (${message.length} bytes) from ${connectionId}`);
+          
+          // If we receive audio but haven't started listening yet, start listening
+          if (message.length > 1000) {  // Only for substantial audio data
+            logger.info(`Received audio data before listening started. Starting listening for ${connectionId}`);
+            this.startListening(connectionId);
+            this.handleAudioData(connectionId, message);
+          }
         }
       } else if (typeof message === 'string' || message instanceof String) {
         // Handle string message
@@ -275,6 +282,13 @@ export class VoiceService extends EventEmitter {
         config: {
           iceServers: this.iceServers
         },
+        sdpTransform: (sdp) => {
+          // Ensure the SDP includes both sending and receiving capabilities
+          // This addresses the issue where 'recvonly' might be preventing proper audio flow
+          const modifiedSdp = sdp.replace('a=recvonly', 'a=sendrecv');
+          logger.debug(`Modified SDP for ${connectionId} to ensure bidirectional audio.`);
+          return modifiedSdp;
+        },
         wrtc: require('wrtc') // Explicitly provide the wrtc implementation
       });
       
@@ -298,12 +312,23 @@ export class VoiceService extends EventEmitter {
       
       peer.on('data', (chunk: Buffer) => {
         // Handle audio data received through the data channel
+        logger.info(`Received ${chunk.length} bytes of data through WebRTC data channel from ${connectionId}`);
         this.handleAudioData(connectionId, chunk);
       });
       
       peer.on('stream', (stream: MediaStream) => {
         logger.info(`Received media stream from ${connectionId}`);
-        // We would handle the stream here if needed
+        
+        // Process any audio tracks from the stream
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          logger.info(`Stream contains ${audioTracks.length} audio tracks from ${connectionId}`);
+          
+          // You could set up a MediaRecorder here to capture audio from the stream
+          // This would be an alternative to the data channel approach
+        } else {
+          logger.warn(`Received stream but it contains no audio tracks from ${connectionId}`);
+        }
       });
       
       peer.on('error', (err: Error) => {
@@ -387,11 +412,24 @@ export class VoiceService extends EventEmitter {
     // Update stats
     connection.totalAudioReceived += audioChunk.length;
     
-    logger.debug(`Received audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes, total received: ${connection.totalAudioReceived} bytes`);
+    logger.info(`Received audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes, total received: ${connection.totalAudioReceived} bytes`);
     
     // Special logging for first audio chunk
     if (connection.totalAudioReceived === audioChunk.length) {
       logger.info(`🎉 Received first audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes`);
+      
+      // If this is a binary audio chunk (not a text message), set the connection state to connected
+      if (connection.state === 'connecting') {
+        connection.state = 'connected';
+        logger.info(`Updated connection state to 'connected' after receiving first audio chunk for ${connectionId}`);
+      }
+    }
+    
+    // Check if we've received enough audio to process (at least 500KB or 5 seconds worth)
+    const totalSize = connection.audioBuffer.reduce((sum, buffer) => sum + buffer.length, 0);
+    if (totalSize > 50000) {
+      logger.info(`Collected ${totalSize} bytes of audio data, stopping listening to process.`);
+      this.stopListening(connectionId);
     }
   }
 
@@ -455,6 +493,9 @@ export class VoiceService extends EventEmitter {
         if (audioData.length === 0) {
           logger.warn(`No audio data received from connection ${connectionId}`);
           this.sendError(connectionId, 'MEDIA_ERROR', 'No audio data received');
+          
+          // Start listening again to allow more audio collection
+          this.startListening(connectionId);
           return;
         }
         
@@ -466,6 +507,9 @@ export class VoiceService extends EventEmitter {
         // Clear the buffer after processing
         connection.audioBuffer = [];
         logger.debug(`Audio buffer cleared for connection ${connectionId}`);
+        
+        // Start listening again automatically after processing
+        this.startListening(connectionId);
       } catch (error) {
         logger.error(`🔴 Error processing audio from connection ${connectionId}:`, error);
         this.sendError(
@@ -473,15 +517,21 @@ export class VoiceService extends EventEmitter {
           'MEDIA_ERROR', 
           `Failed to process audio: ${error instanceof Error ? error.message : String(error)}`
         );
+        
+        // Start listening again to allow more audio collection despite the error
+        this.startListening(connectionId);
       }
     } else {
       logger.warn(`No audio data collected from connection ${connectionId}`);
       this.sendError(connectionId, 'MEDIA_ERROR', 'No audio data received');
+      
+      // Start listening again to allow more audio collection
+      this.startListening(connectionId);
     }
   }
   
   /**
-   * Process audio data through STT -> LLM -> TTS pipeline
+   * Process audio data through STT -> TTS pipeline (skipping LLM for echo server)
    */
   private async processAudio(connectionId: string, audioData: Buffer): Promise<void> {
     const connection = this.connections.get(connectionId);
@@ -491,55 +541,114 @@ export class VoiceService extends EventEmitter {
     }
     
     try {
-      logger.info(`🔄 Starting audio processing pipeline for connection ${connectionId}`);
+      logger.info(`🔄 Starting audio echo processing pipeline for connection ${connectionId}`);
+      
+      // Ensure we have audio data to process
+      if (!audioData || audioData.length === 0) {
+        logger.warn(`Empty audio data for connection ${connectionId}`);
+        this.sendError(connectionId, 'MEDIA_ERROR', 'No audio data to process');
+        return;
+      }
+      
+      // Log audio format information
+      logger.info(`Audio data format: ${audioData.length} bytes for connection ${connectionId}`);
       
       // Step 1: Speech-to-text with Deepgram
       logger.info(`🎤→📝 Calling Deepgram STT service for connection ${connectionId}`);
       const startStt = Date.now();
-      const transcribedText = await this.deepgramService.transcribeAudio(audioData);
-      const sttDuration = Date.now() - startStt;
       
-      if (!transcribedText) {
-        logger.warn(`Empty transcription result for connection ${connectionId}`);
-        this.sendError(connectionId, 'MEDIA_ERROR', 'Failed to transcribe audio (empty result)');
-        return;
+      try {
+        const transcribedText = await this.deepgramService.transcribeAudio(audioData);
+        const sttDuration = Date.now() - startStt;
+        
+        if (!transcribedText || transcribedText.trim() === '') {
+          logger.warn(`Empty transcription result for connection ${connectionId}`);
+          
+          // Use a default response when transcription fails
+          const defaultResponse = "I couldn't hear that clearly. Could you please speak again?";
+          
+          // Send the default response to TTS
+          logger.info(`Using default response for connection ${connectionId}: "${defaultResponse}"`);
+          this.sendMessage(connectionId, { type: 'speaking-start' });
+          
+          const startTts = Date.now();
+          const audioResponse = await this.cartesiaService.textToSpeech(defaultResponse);
+          const ttsDuration = Date.now() - startTts;
+          
+          logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
+          
+          // Send audio to client
+          await this.sendAudioToClient(connectionId, audioResponse);
+          return;
+        }
+        
+        logger.info(`✅ STT completed in ${sttDuration}ms for connection ${connectionId}, transcribed: "${transcribedText.substring(0, 100)}${transcribedText.length > 100 ? '...' : ''}"`);
+        
+        // Create echo response (skip LLM processing)
+        logger.info(`📝→🔊 Creating echo response for connection ${connectionId}`);
+        const echoResponse = `You said: ${transcribedText}`;
+        
+        // Step 2: Text-to-speech with Cartesia
+        logger.info(`💭→🔊 Starting TTS process for connection ${connectionId}`);
+        this.sendMessage(connectionId, { type: 'speaking-start' });
+        
+        const startTts = Date.now();
+        
+        try {
+          const audioResponse = await this.cartesiaService.textToSpeech(echoResponse);
+          const ttsDuration = Date.now() - startTts;
+          
+          if (!audioResponse || audioResponse.length === 0) {
+            logger.warn(`Empty TTS response for connection ${connectionId}`);
+            this.sendError(connectionId, 'MEDIA_ERROR', 'Failed to generate speech from text');
+            return;
+          }
+          
+          logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
+          
+          // Step 3: Send audio back to client
+          logger.info(`🔊→📱 Sending ${audioResponse.length} bytes of audio back to connection ${connectionId}`);
+          
+          // Send the audio to the client
+          await this.sendAudioToClient(connectionId, audioResponse);
+          
+          const totalProcessingTime = sttDuration + ttsDuration;
+          logger.info(`📊 Total echo processing time: ${totalProcessingTime}ms for connection ${connectionId}`);
+        } catch (ttsError) {
+          logger.error(`TTS service error for ${connectionId}:`, ttsError);
+          this.sendError(connectionId, 'TTS_ERROR', 'Text-to-speech service failed');
+        }
+      } catch (sttError) {
+        logger.error(`STT service error for ${connectionId}:`, sttError);
+        this.sendError(connectionId, 'STT_ERROR', 'Speech-to-text service failed');
+        
+        // Try to return a fallback audio response
+        const fallbackResponse = "I'm having trouble understanding you right now. Could you try again?";
+        try {
+          this.sendMessage(connectionId, { type: 'speaking-start' });
+          const audioResponse = await this.cartesiaService.textToSpeech(fallbackResponse);
+          await this.sendAudioToClient(connectionId, audioResponse);
+        } catch (fallbackError) {
+          logger.error(`Failed to send fallback audio for ${connectionId}:`, fallbackError);
+        }
       }
-      
-      logger.info(`✅ STT completed in ${sttDuration}ms for connection ${connectionId}, transcribed: "${transcribedText.substring(0, 100)}${transcribedText.length > 100 ? '...' : ''}"`);
-      
-      // Step 2: Process with Gemini LLM
-      logger.info(`📝→💭 Calling Gemini LLM service for connection ${connectionId}`);
-      const startLlm = Date.now();
-      const llmResponse = await this.geminiService.processText(transcribedText);
-      const llmDuration = Date.now() - startLlm;
-      
-      logger.info(`✅ LLM processing completed in ${llmDuration}ms for connection ${connectionId}, response: "${llmResponse.substring(0, 100)}${llmResponse.length > 100 ? '...' : ''}"`);
-      
-      // Step 3: Text-to-speech with Cartesia
-      logger.info(`💭→🔊 Starting TTS process for connection ${connectionId}`);
-      this.sendMessage(connectionId, { type: 'speaking-start' });
-      
-      const startTts = Date.now();
-      const audioResponse = await this.cartesiaService.textToSpeech(llmResponse);
-      const ttsDuration = Date.now() - startTts;
-      
-      logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
-      
-      // Step 4: Send audio back to client
-      logger.info(`🔊→📱 Sending ${audioResponse.length} bytes of audio back to connection ${connectionId}`);
-      
-      // Send the audio to the client
-      await this.sendAudioToClient(connectionId, audioResponse);
-      
-      const totalProcessingTime = sttDuration + llmDuration + ttsDuration;
-      logger.info(`📊 Total processing time: ${totalProcessingTime}ms for connection ${connectionId}`);
     } catch (error) {
-      logger.error(`🔴 Error in audio processing pipeline for connection ${connectionId}:`, error);
+      logger.error(`🔴 Error in audio echo pipeline for connection ${connectionId}:`, error);
       this.sendError(
         connectionId, 
         'INTERNAL_ERROR', 
         `Audio processing failed: ${error instanceof Error ? error.message : String(error)}`
       );
+      
+      // Try to provide some audio feedback even when the pipeline fails
+      try {
+        const errorResponse = "Sorry, I encountered a technical issue. Please try again in a moment.";
+        this.sendMessage(connectionId, { type: 'speaking-start' });
+        const audioResponse = await this.cartesiaService.textToSpeech(errorResponse);
+        await this.sendAudioToClient(connectionId, audioResponse);
+      } catch (feedbackError) {
+        logger.error(`Failed to send error audio feedback for ${connectionId}`, feedbackError);
+      }
     }
   }
 
@@ -554,33 +663,74 @@ export class VoiceService extends EventEmitter {
     }
     
     try {
+      logger.info(`Attempting to send ${audioData.length} bytes of audio to ${connectionId}`);
+      
+      let success = false;
+      
+      // First try WebRTC for better performance if it's available and connected
       if (connection.peer && connection.peer.connected) {
-        // If we have a connected WebRTC peer, send the audio through the data channel
-        logger.info(`Sending audio via WebRTC data channel to ${connectionId}`);
-        
-        // Send audio in chunks if it's large to avoid buffer overflows
-        const CHUNK_SIZE = 16000; // 16KB chunks
-        
-        for (let i = 0; i < audioData.length; i += CHUNK_SIZE) {
-          const chunk = audioData.slice(i, i + CHUNK_SIZE);
-          connection.peer.send(chunk);
-        }
-        
-        logger.debug(`Audio data sent via WebRTC to ${connectionId}`);
-      } else {
-        // Fallback to WebSocket for audio
-        logger.info(`Sending audio via WebSocket to ${connectionId}`);
-        
-        connection.ws.send(audioData, { binary: true }, (err: Error | null) => {
-          if (err) {
-            logger.error(`Failed to send audio data to ${connectionId}:`, err);
-          } else {
-            logger.debug(`Successfully sent ${audioData.length} bytes of audio to ${connectionId}`);
+        try {
+          // If we have a connected WebRTC peer, send the audio through the data channel
+          logger.info(`Sending audio via WebRTC data channel to ${connectionId}`);
+          
+          // Send audio in chunks if it's large to avoid buffer overflows
+          const CHUNK_SIZE = 16000; // 16KB chunks
+          let chunksSent = 0;
+          
+          for (let i = 0; i < audioData.length; i += CHUNK_SIZE) {
+            const chunk = audioData.slice(i, i + CHUNK_SIZE);
+            connection.peer.send(chunk);
+            chunksSent++;
           }
-        });
+          
+          logger.info(`Audio data sent via WebRTC to ${connectionId} in ${chunksSent} chunks`);
+          success = true;
+        } catch (webrtcError) {
+          logger.error(`Failed to send audio via WebRTC to ${connectionId}:`, webrtcError);
+          // Fall back to WebSocket if WebRTC fails
+          logger.info(`Falling back to WebSocket for audio delivery to ${connectionId}`);
+        }
       }
       
-      // Short delay to ensure audio processing finishes
+      // Fall back to WebSocket if WebRTC didn't work or isn't available
+      if (!success && connection.ws.readyState === 1) { // 1 = OPEN
+        try {
+          // Fallback to WebSocket for audio
+          logger.info(`Sending audio via WebSocket to ${connectionId}`);
+          
+          // Send audio in chunks over websocket as well to avoid large packet issues
+          const CHUNK_SIZE = 16000; // 16KB chunks
+          let chunksSent = 0;
+          
+          for (let i = 0; i < audioData.length; i += CHUNK_SIZE) {
+            const chunk = audioData.slice(i, i + CHUNK_SIZE);
+            
+            // Use a promise to handle the send operation
+            await new Promise<void>((resolve, reject) => {
+              connection.ws.send(chunk, { binary: true }, (err: Error | null) => {
+                if (err) {
+                  reject(err);
+                } else {
+                  resolve();
+                }
+              });
+            });
+            
+            chunksSent++;
+          }
+          
+          logger.info(`Successfully sent ${audioData.length} bytes of audio in ${chunksSent} chunks via WebSocket to ${connectionId}`);
+          success = true;
+        } catch (wsError) {
+          logger.error(`Failed to send audio via WebSocket to ${connectionId}:`, wsError);
+          throw new Error(`All audio delivery methods failed: ${wsError.message}`);
+        }
+      } else if (!success) {
+        logger.error(`Cannot send audio to ${connectionId}: WebRTC unavailable and WebSocket not in OPEN state (state: ${connection.ws.readyState})`);
+        throw new Error('All audio delivery methods unavailable');
+      }
+      
+      // Short delay to ensure audio processing finishes on the client side
       await new Promise(resolve => setTimeout(resolve, 100));
       
       // Send speaking-end notification when audio is sent
