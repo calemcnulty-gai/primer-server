@@ -26,6 +26,29 @@ export interface StreamingTtsOptions {
   };
 }
 
+// Define OutputFormat types that match Cartesia's API
+type RawOutputFormat = {
+  container: 'raw';
+  encoding: RawEncoding;
+  sampleRate: number;
+  bitRate?: number;
+};
+
+type WavOutputFormat = {
+  container: 'wav';
+  encoding: RawEncoding;
+  sampleRate: number;
+  bitRate?: number;
+};
+
+type Mp3OutputFormat = {
+  container: 'mp3';
+  sampleRate: number;
+  bitRate: number;
+};
+
+type OutputFormat = RawOutputFormat | WavOutputFormat | Mp3OutputFormat;
+
 // Define the interface that matches what the Cartesia SDK actually returns
 interface ChunkData {
   chunk?: {
@@ -73,7 +96,8 @@ export class CartesiaService extends EventEmitter {
       logger.info(`[${requestId}] Converting text to speech: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
       
       // Use raw PCM format to match streaming - this is important for client compatibility!
-      const outputFormat = {
+      // Explicitly type this as a RawOutputFormat to match Cartesia's API types
+      const outputFormat: RawOutputFormat = {
         container: 'raw',
         encoding: 'pcm_s16le',
         sampleRate: 16000 // Match client-side expectation: 16kHz
@@ -148,27 +172,27 @@ export class CartesiaService extends EventEmitter {
       };
       
       // Add output format based on container type
-      let outputFormat: any;
+      let outputFormat: OutputFormat;
       
       if (options.outputFormat?.container === 'mp3') {
         outputFormat = {
           container: 'mp3',
           sampleRate: options.outputFormat.sampleRate || 16000,
           bitRate: options.outputFormat.bitRate || 128000
-        };
+        } as Mp3OutputFormat;
       } else if (options.outputFormat?.container === 'wav') {
         outputFormat = {
           container: 'wav',
           encoding: options.outputFormat.encoding || 'pcm_s16le',
           sampleRate: options.outputFormat.sampleRate || 16000
-        };
+        } as WavOutputFormat;
       } else {
         // Default to raw PCM
         outputFormat = {
           container: 'raw',
           encoding: options.outputFormat?.encoding || 'pcm_s16le',
           sampleRate: options.outputFormat?.sampleRate || 16000
-        };
+        } as RawOutputFormat;
       }
       
       // Log chosen format
