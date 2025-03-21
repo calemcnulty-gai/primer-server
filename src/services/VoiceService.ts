@@ -1,4 +1,6 @@
 import { EventEmitter } from 'events';
+import * as SimplePeer from 'simple-peer';
+import * as wav from 'node-wav';
 import { DeepgramService } from './DeepgramService';
 import { GeminiService } from './GeminiService';
 import { CartesiaService } from './CartesiaService';
@@ -9,13 +11,15 @@ const logger = createLogger('VoiceService');
 // Interface for WebRTC connection
 interface RTCConnection {
   ws: any; // WebSocket connection
+  peer?: SimplePeer.Instance; // Simple-peer instance
   state: 'new' | 'connecting' | 'connected' | 'failed' | 'closed';
   isListening: boolean;
   lastActivity: number;
-  audioBuffer?: Buffer[]; // Buffer to collect audio chunks
+  audioBuffer: Buffer[]; // Buffer to collect audio chunks
   totalAudioReceived: number; // Track total bytes received
   messagesReceived: number; // Track number of messages received
   messagesSent: number; // Track number of messages sent
+  statsInterval?: NodeJS.Timeout; // Interval for logging connection stats
 }
 
 export class VoiceService extends EventEmitter {
@@ -32,6 +36,8 @@ export class VoiceService extends EventEmitter {
     this.status = 'initializing';
     this.iceServers = [
       { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
       // Add more STUN/TURN servers as needed
     ];
 
@@ -87,11 +93,11 @@ export class VoiceService extends EventEmitter {
   public handleNewConnection(connectionId: string, ws: any): void {
     logger.info(`🔌 New WebSocket connection received: ${connectionId}`);
     
-    // Create a new connection object with initial state set to 'connected'
+    // Create a new connection object with initial state
     const connection: RTCConnection = {
       ws,
-      state: 'connected', // Immediately set state to connected to avoid state transition issues
-      isListening: true,  // Auto-start listening
+      state: 'new',
+      isListening: false,
       lastActivity: Date.now(),
       audioBuffer: [],
       totalAudioReceived: 0,
@@ -101,16 +107,14 @@ export class VoiceService extends EventEmitter {
 
     // Store the connection
     this.connections.set(connectionId, connection);
-    logger.debug(`Connection object created and stored for ${connectionId} (auto-configured as connected and listening)`);
+    logger.debug(`Connection object created and stored for ${connectionId}`);
 
     // Set up WebSocket message handler
     ws.on('message', (message: any) => {
       connection.messagesReceived++;
       
-      // Debug the raw message
-      if (message instanceof Buffer) {
-        logger.debug(`Raw binary message from ${connectionId}: first 10 bytes: ${message.slice(0, 10).toString('hex')}, length: ${message.length}`);
-      }
+      // Update last activity time
+      connection.lastActivity = Date.now();
       
       // First try to detect if the binary data is actually JSON
       if (message instanceof Buffer) {
@@ -118,10 +122,7 @@ export class VoiceService extends EventEmitter {
           // Check for JSON structure in the binary data
           const textMessage = message.toString('utf8');
           
-          // Log the first part of the message for debugging
-          logger.debug(`Trying to parse as JSON: ${textMessage.substring(0, 50)}...`);
-          
-          // Check if it looks like JSON (starts with { and has a "type" field)
+          // Check if it looks like JSON (starts with { and ends with })
           if (textMessage.startsWith('{') && textMessage.includes('"type"')) {
             // Try parsing as JSON
             const parsedMessage = JSON.parse(textMessage);
@@ -136,9 +137,13 @@ export class VoiceService extends EventEmitter {
           logger.debug(`Failed to parse binary as JSON: ${e instanceof Error ? e.message : String(e)}`);
         }
         
-        // Handle as binary audio data
-        logger.debug(`Handling as binary data #${connection.messagesReceived} from connection ${connectionId}, size: ${message.length} bytes`);
-        this.handleAudioData(connectionId, message);
+        // Handle as binary audio data if we're listening
+        if (connection.isListening) {
+          logger.debug(`Handling as binary data #${connection.messagesReceived} from connection ${connectionId}, size: ${message.length} bytes`);
+          this.handleAudioData(connectionId, message);
+        } else {
+          logger.debug(`Received binary data but not listening yet (${message.length} bytes) from ${connectionId}`);
+        }
       } else if (typeof message === 'string' || message instanceof String) {
         // Handle string message
         logger.debug(`Received text message #${connection.messagesReceived} from connection ${connectionId}`);
@@ -161,7 +166,7 @@ export class VoiceService extends EventEmitter {
       this.sendError(connectionId, 'CONNECTION_FAILED', 'WebSocket connection error');
     });
 
-    logger.info(`🟢 Voice connection fully established and auto-configured: ${connectionId}`);
+    logger.info(`🟢 Voice connection established for: ${connectionId}`);
     
     // Send a message to confirm the connection is ready
     this.sendMessage(connectionId, { type: 'connection-ready' });
@@ -176,84 +181,10 @@ export class VoiceService extends EventEmitter {
       }
     }, 30000); // Log every 30 seconds
     
-    // Store the interval reference in a variable for cleanup
-    (connection as any).statsInterval = statsInterval;
+    // Store the interval reference for cleanup
+    connection.statsInterval = statsInterval;
   }
   
-  /**
-   * Handle audio data, with special detection for start-listening command
-   */
-  private handleAudioData(connectionId: string, audioChunk: Buffer): void {
-    const connection = this.connections.get(connectionId);
-    if (!connection) {
-      logger.debug(`Ignoring audio chunk from connection ${connectionId}: connection not found`);
-      return;
-    }
-    
-    // Special check: Try to detect "start-listening" command in binary data
-    // This handles cases where the client combines control messages with audio data
-    try {
-      // Check first few bytes for potential text
-      const prefix = audioChunk.slice(0, Math.min(150, audioChunk.length)).toString('utf8');
-      if (prefix.includes('"type":"start-listening"')) {
-        logger.info(`🔍 Detected start-listening command embedded in binary data from ${connectionId}`);
-        // Force start listening
-        if (!connection.isListening) {
-          if (connection.state !== 'connected') {
-            connection.state = 'connected';
-          }
-          this.startListening(connectionId);
-        }
-      }
-    } catch (e) {
-      // Not a text prefix, continue normal processing
-    }
-    
-    // Update last activity time regardless of listening state
-    connection.lastActivity = Date.now();
-    
-    // Handle small packets differently - they might be heartbeats
-    const isSmallPacket = audioChunk.length < 50;
-    
-    // If connection exists but isn't listening, auto-start listening
-    if (!connection.isListening) {
-      if (isSmallPacket) {
-        logger.debug(`Received small packet (${audioChunk.length} bytes) from ${connectionId}, might be a heartbeat`);
-      } else {
-        logger.info(`Received substantial audio data (${audioChunk.length} bytes) from non-listening connection ${connectionId}. Auto-starting listening.`);
-        // Auto-repair connection state if needed
-        if (connection.state !== 'connected') {
-          logger.warn(`Auto-repairing connection state for ${connectionId} from ${connection.state} to 'connected'`);
-          connection.state = 'connected';
-        }
-        // Force start listening since we're getting actual audio
-        this.startListening(connectionId);
-      }
-      
-      // Skip processing for now - the next audio chunk will be processed
-      return;
-    }
-    
-    // Don't process very small packets as audio
-    if (isSmallPacket) {
-      logger.debug(`Skipping small packet (${audioChunk.length} bytes) from ${connectionId} - likely a heartbeat`);
-      return;
-    }
-    
-    // Store the audio chunk in the connection's buffer
-    connection.audioBuffer?.push(audioChunk);
-    
-    // Update stats
-    connection.totalAudioReceived += audioChunk.length;
-    
-    logger.debug(`Received audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes, total received: ${connection.totalAudioReceived} bytes`);
-    
-    // If this is the first audio chunk after starting to listen, log it specially
-    if (connection.totalAudioReceived === audioChunk.length) {
-      logger.info(`🎉 Received first audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes`);
-    }
-  }
-
   /**
    * Handle a message from a WebSocket connection
    */
@@ -261,7 +192,6 @@ export class VoiceService extends EventEmitter {
     const connection = this.connections.get(connectionId);
     if (!connection) {
       logger.warn(`Received message for unknown connection: ${connectionId}`);
-      // Try to recreate the connection if we receive messages for it
       try {
         this.sendError(connectionId, 'CONNECTION_NOT_FOUND', 'Connection needs to be re-established');
       } catch (e) {
@@ -269,9 +199,6 @@ export class VoiceService extends EventEmitter {
       }
       return;
     }
-
-    // Update last activity time
-    connection.lastActivity = Date.now();
 
     try {
       const data = JSON.parse(message);
@@ -292,7 +219,7 @@ export class VoiceService extends EventEmitter {
           break;
           
         case 'start-listening':
-          logger.info(`⭐⭐⭐ RECEIVED START-LISTENING from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
+          logger.info(`Processing start-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
           this.startListening(connectionId);
           break;
           
@@ -335,35 +262,67 @@ export class VoiceService extends EventEmitter {
 
     logger.info(`Processing WebRTC offer from connection ${connectionId}`);
     
-    // In a real implementation, we would:
-    // 1. Create an RTCPeerConnection
-    // 2. Set the remote description from data.sdp
-    // 3. Create an answer
-    // 4. Set the local description
-    // 5. Send the answer back to the client
-
-    // For this mock implementation, we'll just simulate the process
-    connection.state = 'connecting';
-    logger.debug(`Changed connection state to 'connecting' for ${connectionId}`);
-    
-    // Simulate creating and sending an RTC answer immediately (no timeout)
-    const answerMessage = {
-      type: 'answer',
-      sdp: {
-        // Mock SDP data that would normally come from RTCPeerConnection.createAnswer()
-        type: 'answer',
-        sdp: 'v=0\r\no=- 123456789 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n...'
-      }
-    };
-    
-    logger.info(`Sending WebRTC answer to connection ${connectionId}`);
-    this.sendMessage(connectionId, answerMessage);
-    connection.state = 'connected';
-    logger.debug(`Changed connection state to 'connected' for ${connectionId}`);
-    
-    // Automatically start listening for this connection to avoid missed audio chunks
-    this.startListening(connectionId);
-    logger.info(`Auto-started listening for connection ${connectionId} after successful offer`);
+    try {
+      // Update connection state
+      connection.state = 'connecting';
+      logger.debug(`Changed connection state to 'connecting' for ${connectionId}`);
+      
+      // Create a SimplePeer instance in answer mode
+      const peer = new SimplePeer({
+        trickle: true,
+        config: { iceServers: this.iceServers }
+      });
+      
+      // Store the peer instance
+      connection.peer = peer;
+      
+      // Set up event handlers for the peer
+      peer.on('signal', (signalData: any) => {
+        // Send any signaling data back to the client
+        logger.info(`WebRTC signaling data generated for ${connectionId}, type: ${signalData.type || 'candidate'}`);
+        this.sendMessage(connectionId, signalData);
+      });
+      
+      peer.on('connect', () => {
+        logger.info(`WebRTC peer connection established for ${connectionId}`);
+        connection.state = 'connected';
+        
+        // Auto-start listening
+        this.startListening(connectionId);
+      });
+      
+      peer.on('data', (chunk: Buffer) => {
+        // Handle audio data received through the data channel
+        this.handleAudioData(connectionId, chunk);
+      });
+      
+      peer.on('stream', (stream: MediaStream) => {
+        logger.info(`Received media stream from ${connectionId}`);
+        // We would handle the stream here if needed
+      });
+      
+      peer.on('error', (err: Error) => {
+        logger.error(`WebRTC peer error for ${connectionId}:`, err);
+        this.sendError(connectionId, 'WEBRTC_ERROR', err.message);
+      });
+      
+      peer.on('close', () => {
+        logger.info(`WebRTC peer connection closed for ${connectionId}`);
+        if (connection.state !== 'closed') {
+          connection.state = 'closed';
+          // We don't automatically close the WebSocket when the peer connection is closed
+        }
+      });
+      
+      // Signal the peer with the offer from the client
+      peer.signal(data);
+      
+      logger.info(`WebRTC offer processed for ${connectionId}`);
+    } catch (error) {
+      logger.error(`Failed to process offer from ${connectionId}:`, error);
+      this.sendError(connectionId, 'OFFER_PROCESSING_FAILED', 'Could not process WebRTC offer');
+      connection.state = 'failed';
+    }
   }
 
   /**
@@ -376,28 +335,58 @@ export class VoiceService extends EventEmitter {
       return;
     }
 
-    // In a real implementation, we would add the ICE candidate to the RTCPeerConnection
-    // For the mock implementation, we'll just log that we received it
     logger.info(`Received ICE candidate from connection ${connectionId}`);
     
-    // Simulate sending our own ICE candidate immediately (no timeout)
-    const iceMessage = {
-      type: 'ice-candidate',
-      candidate: {
-        // Mock ICE candidate data
-        candidate: 'candidate:123456789 1 udp 2122260223 192.168.1.1 56789 typ host generation 0',
-        sdpMLineIndex: 0,
-        sdpMid: 'audio'
-      }
-    };
+    if (!connection.peer) {
+      logger.warn(`Received ICE candidate but no peer connection exists for ${connectionId}`);
+      return;
+    }
     
-    logger.info(`Sending ICE candidate to connection ${connectionId}`);
-    this.sendMessage(connectionId, iceMessage);
+    try {
+      // Signal the ICE candidate to the peer
+      connection.peer.signal(data);
+      logger.debug(`ICE candidate signaled to peer for ${connectionId}`);
+    } catch (error) {
+      logger.error(`Failed to process ICE candidate from ${connectionId}:`, error);
+    }
+  }
+
+  /**
+   * Handle audio data from client
+   */
+  private handleAudioData(connectionId: string, audioChunk: Buffer): void {
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      logger.debug(`Ignoring audio chunk from connection ${connectionId}: connection not found`);
+      return;
+    }
     
-    // Make sure connection state is advanced if still in 'new' state
-    if (connection.state === 'new') {
-      connection.state = 'connecting';
-      logger.info(`Updated connection ${connectionId} state to 'connecting' after ICE candidate`);
+    // Update last activity time
+    connection.lastActivity = Date.now();
+    
+    // Only process if we're listening
+    if (!connection.isListening) {
+      logger.debug(`Skipping audio chunk from ${connectionId} - not listening yet`);
+      return;
+    }
+    
+    // Skip very small packets (likely heartbeats)
+    if (audioChunk.length < 50) {
+      logger.debug(`Skipping small packet (${audioChunk.length} bytes) from ${connectionId} - likely a heartbeat`);
+      return;
+    }
+    
+    // Store the audio chunk
+    connection.audioBuffer.push(audioChunk);
+    
+    // Update stats
+    connection.totalAudioReceived += audioChunk.length;
+    
+    logger.debug(`Received audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes, total received: ${connection.totalAudioReceived} bytes`);
+    
+    // Special logging for first audio chunk
+    if (connection.totalAudioReceived === audioChunk.length) {
+      logger.info(`🎉 Received first audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes`);
     }
   }
 
@@ -413,10 +402,11 @@ export class VoiceService extends EventEmitter {
 
     logger.info(`Processing start-listening request for connection ${connectionId} (current state: ${connection.state}, currently listening: ${connection.isListening})`);
 
-    // Auto-repair connection state if needed
-    if (connection.state === 'new') {
-      logger.warn(`Connection ${connectionId} is still in 'new' state when start-listening requested. Auto-repairing connection state.`);
-      connection.state = 'connected';
+    // Only proceed if we're not already listening
+    if (connection.isListening) {
+      logger.debug(`Already listening for connection ${connectionId}`);
+      this.sendMessage(connectionId, { type: 'listening-started' });
+      return;
     }
 
     // Reset audio buffer
@@ -437,6 +427,13 @@ export class VoiceService extends EventEmitter {
     const connection = this.connections.get(connectionId);
     if (!connection) {
       logger.warn(`Received stop-listening for unknown connection: ${connectionId}`);
+      return;
+    }
+
+    // Only proceed if we're currently listening
+    if (!connection.isListening) {
+      logger.debug(`Not currently listening for connection ${connectionId}`);
+      this.sendMessage(connectionId, { type: 'listening-stopped' });
       return;
     }
 
@@ -524,23 +521,13 @@ export class VoiceService extends EventEmitter {
       logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
       
       // Step 4: Send audio back to client
-      // In a real implementation with WebRTC, this would be sent through the audio track
-      // For our mock implementation, we'll simulate sending the audio
       logger.info(`🔊→📱 Sending ${audioResponse.length} bytes of audio back to connection ${connectionId}`);
       
-      // Since we're not actually sending audio over WebRTC in this implementation,
-      // we'll simulate a delay based on audio length
-      const audioDurationMs = Math.min(audioResponse.length / 16, 5000); // Rough estimate
+      // Send the audio to the client
+      await this.sendAudioToClient(connectionId, audioResponse);
       
       const totalProcessingTime = sttDuration + llmDuration + ttsDuration;
       logger.info(`📊 Total processing time: ${totalProcessingTime}ms for connection ${connectionId}`);
-      
-      setTimeout(() => {
-        // Send speaking-end notification when "playback" is complete
-        logger.info(`✅ Audio playback completed for connection ${connectionId}`);
-        this.sendMessage(connectionId, { type: 'speaking-end' });
-      }, audioDurationMs);
-      
     } catch (error) {
       logger.error(`🔴 Error in audio processing pipeline for connection ${connectionId}:`, error);
       this.sendError(
@@ -548,6 +535,55 @@ export class VoiceService extends EventEmitter {
         'INTERNAL_ERROR', 
         `Audio processing failed: ${error instanceof Error ? error.message : String(error)}`
       );
+    }
+  }
+
+  /**
+   * Send audio data back to the client
+   */
+  private async sendAudioToClient(connectionId: string, audioData: Buffer): Promise<void> {
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      logger.warn(`Cannot send audio to disconnected client: ${connectionId}`);
+      return;
+    }
+    
+    try {
+      if (connection.peer && connection.peer.connected) {
+        // If we have a connected WebRTC peer, send the audio through the data channel
+        logger.info(`Sending audio via WebRTC data channel to ${connectionId}`);
+        
+        // Send audio in chunks if it's large to avoid buffer overflows
+        const CHUNK_SIZE = 16000; // 16KB chunks
+        
+        for (let i = 0; i < audioData.length; i += CHUNK_SIZE) {
+          const chunk = audioData.slice(i, i + CHUNK_SIZE);
+          connection.peer.send(chunk);
+        }
+        
+        logger.debug(`Audio data sent via WebRTC to ${connectionId}`);
+      } else {
+        // Fallback to WebSocket for audio
+        logger.info(`Sending audio via WebSocket to ${connectionId}`);
+        
+        connection.ws.send(audioData, { binary: true }, (err: Error | null) => {
+          if (err) {
+            logger.error(`Failed to send audio data to ${connectionId}:`, err);
+          } else {
+            logger.debug(`Successfully sent ${audioData.length} bytes of audio to ${connectionId}`);
+          }
+        });
+      }
+      
+      // Short delay to ensure audio processing finishes
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Send speaking-end notification when audio is sent
+      logger.info(`✅ Audio sent to client ${connectionId}`);
+      this.sendMessage(connectionId, { type: 'speaking-end' });
+    } catch (error) {
+      logger.error(`🔴 Failed to send audio to client ${connectionId}:`, error);
+      this.sendError(connectionId, 'AUDIO_TRANSMISSION_FAILED', 'Failed to send audio response');
     }
   }
 
@@ -561,9 +597,18 @@ export class VoiceService extends EventEmitter {
       return;
     }
     
-    // Clear any intervals
-    if ((connection as any).statsInterval) {
-      clearInterval((connection as any).statsInterval);
+    // Close peer connection if it exists
+    if (connection.peer) {
+      try {
+        connection.peer.destroy();
+      } catch (err) {
+        logger.error(`Error destroying peer for ${connectionId}:`, err);
+      }
+    }
+    
+    // Clear intervals
+    if (connection.statsInterval) {
+      clearInterval(connection.statsInterval);
     }
     
     logger.info(`🔌 Voice connection closed: ${connectionId}`);
