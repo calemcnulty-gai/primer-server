@@ -90,10 +90,19 @@ export class CartesiaService extends EventEmitter {
       
       const endTime = new Date();
       const duration = endTime.getTime() - startTime.getTime();
+      const buffer = Buffer.from(audioArrayBuffer);
+      
+      // Log audio metadata
+      this.logAudioMetadata(buffer, {
+        container: 'mp3',
+        sampleRate: 16000,
+        bitRate: 128000
+      }, 'Non-streaming TTS');
+      
       logger.info(`[${requestId}] [${endTime.toISOString()}] Successfully converted text to speech in ${duration}ms, audio size: ${audioArrayBuffer.byteLength} bytes`);
       
       // Convert ArrayBuffer to Buffer
-      return Buffer.from(audioArrayBuffer);
+      return buffer;
     } catch (error) {
       const errorTime = new Date();
       logger.error(`[${errorTime.toISOString()}] Error converting text to speech:`, error);
@@ -128,26 +137,33 @@ export class CartesiaService extends EventEmitter {
       };
       
       // Add output format based on container type
+      let outputFormat: any;
+      
       if (options.outputFormat?.container === 'mp3') {
-        ttsRequest.outputFormat = {
+        outputFormat = {
           container: 'mp3',
           sampleRate: options.outputFormat.sampleRate || 16000,
           bitRate: options.outputFormat.bitRate || 128000
         };
       } else if (options.outputFormat?.container === 'wav') {
-        ttsRequest.outputFormat = {
+        outputFormat = {
           container: 'wav',
           encoding: options.outputFormat.encoding || 'pcm_s16le',
           sampleRate: options.outputFormat.sampleRate || 16000
         };
       } else {
         // Default to raw PCM
-        ttsRequest.outputFormat = {
+        outputFormat = {
           container: 'raw',
           encoding: options.outputFormat?.encoding || 'pcm_s16le',
           sampleRate: options.outputFormat?.sampleRate || 16000
         };
       }
+      
+      // Log chosen format
+      logger.info(`[${requestId}] TTS format: ${JSON.stringify(outputFormat)}`);
+      
+      ttsRequest.outputFormat = outputFormat;
       
       // Create TTS streaming request using the SDK
       const stream = await this.client.tts.sse(ttsRequest);
@@ -157,6 +173,7 @@ export class CartesiaService extends EventEmitter {
       
       let chunkCount = 0;
       let totalBytes = 0;
+      const chunkStartTimes: number[] = [];
       
       // Process each chunk as it arrives
       for await (const chunk of stream) {
@@ -165,15 +182,28 @@ export class CartesiaService extends EventEmitter {
         
         if (audioData) {
           chunkCount++;
+          const chunkReceiveTime = Date.now();
+          chunkStartTimes.push(chunkReceiveTime);
+          
           const audioChunk = Buffer.from(audioData);
           totalBytes += audioChunk.length;
+          
+          // Calculate inter-chunk timing if we have more than one chunk
+          if (chunkCount > 1) {
+            const timeSinceLastChunk = chunkReceiveTime - chunkStartTimes[chunkCount - 2];
+            logger.debug(`[${requestId}] Chunk #${chunkCount} received ${timeSinceLastChunk}ms after previous chunk`);
+          }
+          
+          // Log audio metadata for this chunk
+          this.logAudioMetadata(audioChunk, outputFormat, `Chunk #${chunkCount}`);
           
           // Emit audio chunk event
           this.emit('audioChunk', { 
             audio: audioChunk, 
             chunkIndex: chunkCount,
             timestamp: new Date().toISOString(),
-            requestId
+            requestId,
+            format: outputFormat
           });
           
           logger.debug(`[${requestId}] Received audio chunk #${chunkCount}, size: ${audioChunk.length} bytes`);
@@ -183,6 +213,17 @@ export class CartesiaService extends EventEmitter {
       const endTime = new Date();
       const duration = endTime.getTime() - startTime.getTime();
       
+      // Calculate average chunk timing
+      if (chunkCount > 1) {
+        const totalTime = chunkStartTimes[chunkCount - 1] - chunkStartTimes[0];
+        const avgChunkInterval = totalTime / (chunkCount - 1);
+        logger.info(`[${requestId}] Average chunk interval: ${avgChunkInterval.toFixed(2)}ms`);
+      }
+      
+      // Calculate expected audio duration based on format
+      const expectedDurationMs = this.calculateExpectedAudioDuration(totalBytes, outputFormat);
+      logger.info(`[${requestId}] Expected audio duration: ${expectedDurationMs.toFixed(2)}ms for ${totalBytes} bytes`);
+      
       logger.info(`[${requestId}] [${endTime.toISOString()}] Streaming TTS completed in ${duration}ms, received ${chunkCount} chunks, total ${totalBytes} bytes`);
       
       // Emit the stream end event
@@ -191,7 +232,8 @@ export class CartesiaService extends EventEmitter {
         duration, 
         chunkCount, 
         totalBytes,
-        timestamp: endTime.toISOString() 
+        timestamp: endTime.toISOString(),
+        expectedAudioDuration: expectedDurationMs
       });
       
     } catch (error) {
@@ -206,5 +248,93 @@ export class CartesiaService extends EventEmitter {
       
       throw new Error(`Streaming TTS failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  
+  /**
+   * Calculate expected audio duration based on format and byte count
+   * @param byteCount Total bytes of audio data
+   * @param format Audio format information
+   * @returns Expected duration in milliseconds
+   */
+  private calculateExpectedAudioDuration(byteCount: number, format: any): number {
+    let durationMs = 0;
+    
+    if (format.container === 'raw') {
+      // For raw PCM, duration depends on encoding
+      // pcm_s16le = 2 bytes per sample, pcm_f32le = 4 bytes per sample
+      const bytesPerSample = format.encoding === 'pcm_f32le' ? 4 : 2;
+      const samplesCount = byteCount / bytesPerSample;
+      durationMs = (samplesCount / format.sampleRate) * 1000;
+    } else if (format.container === 'wav') {
+      // WAV has headers, but we'll approximate
+      const bytesPerSample = format.encoding === 'pcm_f32le' ? 4 : 2;
+      // Subtract ~44 bytes for WAV header
+      const samplesCount = (byteCount - 44) / bytesPerSample;
+      durationMs = (samplesCount / format.sampleRate) * 1000;
+    } else if (format.container === 'mp3') {
+      // For MP3, we can estimate based on bitrate
+      // Duration (seconds) = Bytes * 8 / bitRate
+      durationMs = (byteCount * 8 / format.bitRate) * 1000;
+    }
+    
+    return durationMs;
+  }
+  
+  /**
+   * Log detailed audio metadata for debugging
+   * @param audioBuffer Audio buffer to analyze
+   * @param format Format information
+   * @param source Source identifier (e.g., "Chunk #1")
+   */
+  private logAudioMetadata(audioBuffer: Buffer, format: any, source: string): void {
+    // Basic metadata
+    logger.info(`[AUDIO_METADATA] ${source} - Size: ${audioBuffer.length} bytes, Format: ${format.container}, Sample Rate: ${format.sampleRate}Hz`);
+    
+    if (format.container === 'raw' || format.container === 'wav') {
+      logger.info(`[AUDIO_METADATA] ${source} - Encoding: ${format.encoding}`);
+      
+      // Additional PCM analysis for Raw and WAV
+      if (format.encoding === 'pcm_s16le' && audioBuffer.length >= 100) {
+        // Analyze first 50 samples (100 bytes for 16-bit)
+        let samples = [];
+        const offset = format.container === 'wav' ? 44 : 0; // Skip WAV header if needed
+        for (let i = offset; i < Math.min(offset + 100, audioBuffer.length); i += 2) {
+          samples.push(audioBuffer.readInt16LE(i));
+        }
+        
+        // Calculate simple statistics
+        const max = Math.max(...samples);
+        const min = Math.min(...samples);
+        const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+        
+        // Count zero crossings (rough frequency estimate)
+        let crossings = 0;
+        for (let i = 1; i < samples.length; i++) {
+          if ((samples[i-1] < 0 && samples[i] >= 0) || (samples[i-1] >= 0 && samples[i] < 0)) {
+            crossings++;
+          }
+        }
+        
+        logger.info(`[AUDIO_METADATA] ${source} - Sample analysis: Max: ${max}, Min: ${min}, Avg: ${avg.toFixed(2)}, Zero crossings: ${crossings}`);
+      }
+    } else if (format.container === 'mp3') {
+      logger.info(`[AUDIO_METADATA] ${source} - Bit Rate: ${format.bitRate}bps`);
+      
+      // Look for MP3 frame headers (rough analysis)
+      if (audioBuffer.length >= 100) {
+        let frameCount = 0;
+        for (let i = 0; i < audioBuffer.length - 2; i++) {
+          // MP3 frames often start with 0xFF 0xFB (MPEG1 Layer 3)
+          if (audioBuffer[i] === 0xFF && (audioBuffer[i+1] & 0xE0) === 0xE0) {
+            frameCount++;
+          }
+        }
+        logger.info(`[AUDIO_METADATA] ${source} - Detected ~${frameCount} possible MP3 frames`);
+      }
+    }
+    
+    // Calculate estimated duration
+    const durationMs = this.calculateExpectedAudioDuration(audioBuffer.length, format);
+    logger.info(`[AUDIO_METADATA] ${source} - Estimated duration: ${durationMs.toFixed(2)}ms`);
   }
 }
