@@ -326,15 +326,10 @@ export class VoiceService extends EventEmitter {
       logger.info(`Processing audio stream for ${connectionId} with ${audioTracks.length} tracks`);
       logger.debug(`Audio track details: kind=${audioTracks[0].kind}, id=${audioTracks[0].id}, readyState=${audioTracks[0].readyState}, enabled=${audioTracks[0].enabled}`);
 
-      // Create an AudioContext configured for headless operation
+      // Create an AudioContext configured for minimal processing
       const audioContext = new AudioContext({ 
         sampleRate: 16000,
-        // Disable default output device to avoid ALSA errors
-        outputDevice: 'null',
-        // Configure for minimal audio processing
-        latencyHint: 'playback',
-        // Disable audio output
-        sinkId: 'none'
+        latencyHint: 'playback'
       });
       logger.info(`AudioContext created for ${connectionId}, initial state: ${audioContext.state}`);
 
