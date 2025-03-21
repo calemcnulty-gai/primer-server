@@ -3,7 +3,7 @@ import { DeepgramService, DeepgramConnection } from './DeepgramService';
 import { CartesiaService, CartesiaResponse } from './CartesiaService';
 import { WebRTCService, WebRTCMessage } from './WebRTCService';
 import { createLogger } from '../utils/logger';
-import { AudioContext } from 'node-web-audio-api';
+import { RTCAudioSink } from 'wrtc';
 
 const logger = createLogger('VoiceService');
 
@@ -15,6 +15,7 @@ interface AudioSession {
   totalAudioReceived: number; // Track total bytes received
   stream?: any;              // Active MediaStream
   deepgramConnection?: DeepgramConnection; // Active Deepgram connection
+  audioSink?: RTCAudioSink;  // RTCAudioSink for processing audio
 }
 
 export class VoiceService extends EventEmitter {
@@ -308,12 +309,12 @@ export class VoiceService extends EventEmitter {
 
     if (!session.isListening) {
       logger.debug(`Storing stream but not processing yet for ${connectionId} - not in listening mode`);
-      return; // Stream is already stored, wait for startListening
+      return;
     }
 
     if (session.deepgramConnection) {
       logger.info(`Audio processing already active for ${connectionId}, skipping duplicate setup`);
-      return; // Prevent multiple setups for the same stream
+      return;
     }
 
     try {
@@ -326,215 +327,165 @@ export class VoiceService extends EventEmitter {
       logger.info(`Processing audio stream for ${connectionId} with ${audioTracks.length} tracks`);
       logger.debug(`Audio track details: kind=${audioTracks[0].kind}, id=${audioTracks[0].id}, readyState=${audioTracks[0].readyState}, enabled=${audioTracks[0].enabled}`);
 
-      // Create an AudioContext configured for minimal processing
-      const audioContext = new AudioContext({ 
+      // Create Deepgram connection
+      const deepgramConnection = this.deepgramService.createConnection({
+        model: "nova-2",
+        language: "en-US",
+        smart_format: true,
+        interim_results: true,
+        encoding: "linear16",
         sampleRate: 16000,
-        latencyHint: 'playback'
+        channels: 1
       });
-      logger.info(`AudioContext created for ${connectionId}, initial state: ${audioContext.state}`);
+      session.deepgramConnection = deepgramConnection;
 
-      // Resume the AudioContext to ensure it processes audio
-      audioContext.resume().then(() => {
-        logger.info(`AudioContext resumed for ${connectionId}, current state: ${audioContext.state}`);
-      }).catch(err => {
-        logger.error(`Failed to resume AudioContext for ${connectionId}:`, err);
-        // Continue anyway since we don't need audio output
-        logger.info(`Continuing despite AudioContext resume failure - output not needed`);
+      // Create RTCAudioSink for direct PCM extraction
+      const audioSink = new RTCAudioSink(audioTracks[0]);
+      session.audioSink = audioSink;
+
+      // Track processing metrics
+      let processedChunks = 0;
+      let totalBytesProcessed = 0;
+      let silentChunksCount = 0;
+      let lastProcessTime = Date.now();
+
+      // Track transcription state
+      let currentContext: string | null = null;
+      let lastTranscript = '';
+      let isFirstUtterance = true;
+
+      // Process audio data from RTCAudioSink
+      audioSink.ondata = (event) => {
+        if (!session.isListening || !session.deepgramConnection) {
+          logger.debug(`Skipping audio processing for ${connectionId} - not listening or no Deepgram connection`);
+          return;
+        }
+
+        const now = Date.now();
+        const timeSinceLastProcess = now - lastProcessTime;
+        lastProcessTime = now;
+
+        const float32Data = event.samples; // Float32Array from WebRTC
+        const pcmData = Buffer.alloc(float32Data.length * 2);
+
+        // Audio level analysis
+        let minSample = 0, maxSample = 0;
+        let sumSquares = 0;
+
+        // Convert Float32Array to 16-bit PCM with audio analysis
+        for (let i = 0; i < float32Data.length; i++) {
+          const sample = Math.max(-1, Math.min(1, float32Data[i]));
+          const pcmSample = Math.round(sample * 32767);
+          pcmData.writeInt16LE(pcmSample, i * 2);
+          
+          minSample = Math.min(minSample, sample);
+          maxSample = Math.max(maxSample, sample);
+          sumSquares += sample * sample;
+        }
+
+        // Calculate RMS for volume level
+        const rms = Math.sqrt(sumSquares / float32Data.length);
+        const isSilent = rms < 0.001; // Adjust threshold as needed
+
+        if (isSilent) {
+          silentChunksCount++;
+        } else {
+          silentChunksCount = 0;
+        }
+
+        processedChunks++;
+        totalBytesProcessed += pcmData.length;
+
+        // Detailed diagnostic logging
+        if (processedChunks % 4 === 0 || !isSilent) {
+          logger.debug(`Audio processing stats for ${connectionId}:
+            Chunk #${processedChunks}
+            Size: ${pcmData.length} bytes
+            Time since last: ${timeSinceLastProcess}ms
+            RMS: ${rms.toFixed(6)}
+            Range: ${minSample.toFixed(6)} to ${maxSample.toFixed(6)}
+            Silent chunks: ${silentChunksCount}
+            Total processed: ${totalBytesProcessed} bytes`);
+        }
+
+        // Send to Deepgram if not prolonged silence
+        if (!isSilent || silentChunksCount < 20) { // Skip after ~2 seconds of silence
+          session.deepgramConnection.send(pcmData);
+          session.totalAudioReceived += pcmData.length;
+        }
+      };
+
+      // Setup Deepgram event handlers
+      deepgramConnection.on('open', () => {
+        logger.info(`Deepgram connection opened for ${connectionId}`);
       });
 
-      try {
-        const source = audioContext.createMediaStreamSource(stream);
-        logger.debug(`MediaStreamSource created for ${connectionId}, number of outputs: ${source.numberOfOutputs}`);
+      deepgramConnection.on('close', () => {
+        logger.info(`Deepgram connection closed for ${connectionId} after processing ${processedChunks} chunks (${totalBytesProcessed} bytes)`);
+        currentContext = null;
+      });
 
-        const processor = audioContext.createScriptProcessor(4096, 1, 1);
-        logger.debug(`ScriptProcessor created for ${connectionId}, buffer size: 4096, inputs: ${processor.numberOfInputs}, outputs: ${processor.numberOfOutputs}`);
+      deepgramConnection.on('transcript', async (data) => {
+        const transcript = data.channel?.alternatives?.[0]?.transcript || '';
+        const isFinal = data.is_final;
 
-        // Don't connect to destination since we don't need audio output
-        // Just connect source -> processor for PCM extraction
-        source.connect(processor);
-        
-        // Create Deepgram connection with detailed logging
-        logger.info(`Creating Deepgram connection for ${connectionId}...`);
-        const deepgramConnection = this.deepgramService.createConnection({
-          model: "nova-2",
-          language: "en-US",
-          smart_format: true,
-          interim_results: true,
-          encoding: "linear16",
-          sampleRate: 16000,
-          channels: 1
-        });
-        session.deepgramConnection = deepgramConnection;
+        logger.info(`Transcription for ${connectionId}: "${transcript}" (${isFinal ? 'final' : 'interim'})`);
 
-        // Track audio processing metrics
-        let processedChunks = 0;
-        let totalBytesProcessed = 0;
-        let lastProcessTime = Date.now();
-        let silentChunksCount = 0;
-
-        // Track transcription state
-        let currentContext: string | null = null;
-        let lastTranscript = '';
-        let isFirstUtterance = true;
-
-        // Handle Deepgram events with enhanced logging
-        deepgramConnection.on('open', () => {
-          logger.info(`Deepgram connection opened for ${connectionId}`);
-        });
-
-        deepgramConnection.on('close', () => {
-          logger.info(`Deepgram connection closed for ${connectionId} after processing ${processedChunks} chunks (${totalBytesProcessed} bytes)`);
-          currentContext = null;
-        });
-
-        deepgramConnection.on('transcript', async (data) => {
-          const transcript = data.channel?.alternatives?.[0]?.transcript || '';
-          const isFinal = data.is_final;
-
-          logger.info(`Transcription for ${connectionId}: "${transcript}" (${isFinal ? 'final' : 'interim'})`);
-
-          if (transcript.trim()) {
-            if (isFinal) {
-              try {
-                if (isFirstUtterance) {
-                  logger.info(`Sending first utterance to Cartesia: "${transcript}"`);
-                  currentContext = await this.streamToCartesia(connectionId, transcript);
-                  isFirstUtterance = false;
-                } else {
-                  const continuationText = transcript.startsWith(' ') ? transcript : ' ' + transcript;
-                  logger.info(`Sending continuation to Cartesia: "${continuationText}" (context: ${currentContext})`);
-                  currentContext = await this.streamToCartesia(connectionId, continuationText, currentContext);
-                }
-                lastTranscript = transcript;
-              } catch (error) {
-                logger.error(`Error streaming to Cartesia for ${connectionId}:`, error);
+        if (transcript.trim()) {
+          if (isFinal) {
+            try {
+              if (isFirstUtterance) {
+                logger.info(`Sending first utterance to Cartesia: "${transcript}"`);
+                currentContext = await this.streamToCartesia(connectionId, transcript);
+                isFirstUtterance = false;
+              } else {
+                const continuationText = transcript.startsWith(' ') ? transcript : ' ' + transcript;
+                logger.info(`Sending continuation to Cartesia: "${continuationText}" (context: ${currentContext})`);
+                currentContext = await this.streamToCartesia(connectionId, continuationText, currentContext);
               }
-            } else {
-              logger.debug(`Interim transcript for ${connectionId}: "${transcript}"`);
+              lastTranscript = transcript;
+            } catch (error) {
+              logger.error(`Error streaming to Cartesia for ${connectionId}:`, error);
             }
-          }
-        });
-
-        deepgramConnection.on('error', (err) => {
-          logger.error(`Deepgram error for ${connectionId}:`, err);
-          currentContext = null;
-        });
-
-        // Process audio data into PCM chunks with enhanced diagnostics
-        processor.onaudioprocess = (event) => {
-          if (!session.isListening || !session.deepgramConnection) {
-            logger.debug(`Skipping audio processing for ${connectionId} - not listening or no Deepgram connection`);
-            return;
-          }
-
-          const now = Date.now();
-          const timeSinceLastProcess = now - lastProcessTime;
-          lastProcessTime = now;
-
-          const inputBuffer = event.inputBuffer;
-          const float32Data = inputBuffer.getChannelData(0);
-          const pcmData = Buffer.alloc(float32Data.length * 2);
-
-          // Audio level analysis
-          let minSample = 0, maxSample = 0;
-          let sumSquares = 0;
-
-          // Convert Float32Array to 16-bit PCM with audio analysis
-          for (let i = 0; i < float32Data.length; i++) {
-            const sample = Math.max(-1, Math.min(1, float32Data[i]));
-            const pcmSample = Math.round(sample * 32767);
-            pcmData.writeInt16LE(pcmSample, i * 2);
-            
-            minSample = Math.min(minSample, sample);
-            maxSample = Math.max(maxSample, sample);
-            sumSquares += sample * sample;
-          }
-
-          // Calculate RMS (Root Mean Square) for volume level
-          const rms = Math.sqrt(sumSquares / float32Data.length);
-          const isSilent = rms < 0.001; // Adjust threshold as needed
-
-          if (isSilent) {
-            silentChunksCount++;
           } else {
-            silentChunksCount = 0;
+            logger.debug(`Interim transcript for ${connectionId}: "${transcript}"`);
           }
+        }
+      });
 
-          processedChunks++;
-          totalBytesProcessed += pcmData.length;
+      deepgramConnection.on('error', (err) => {
+        logger.error(`Deepgram error for ${connectionId}:`, err);
+        currentContext = null;
+      });
 
-          // Detailed diagnostic logging every second or if audio characteristics change significantly
-          if (processedChunks % 4 === 0 || !isSilent) {
-            logger.debug(`Audio processing stats for ${connectionId}:
-              Chunk #${processedChunks}
-              Size: ${pcmData.length} bytes
-              Time since last: ${timeSinceLastProcess}ms
-              RMS: ${rms.toFixed(6)}
-              Range: ${minSample.toFixed(6)} to ${maxSample.toFixed(6)}
-              Silent chunks: ${silentChunksCount}
-              Total processed: ${totalBytesProcessed} bytes`);
-          }
+      // Cleanup on track end
+      audioTracks[0].onended = () => {
+        logger.info(`Audio track ended for ${connectionId}. Stats:
+          Total chunks processed: ${processedChunks}
+          Total bytes processed: ${totalBytesProcessed}
+          Processing duration: ${((Date.now() - lastProcessTime) / 1000).toFixed(1)}s`);
 
-          // Send to Deepgram if not prolonged silence
-          if (!isSilent || silentChunksCount < 20) { // Skip after 5 seconds of silence
-            session.deepgramConnection.send(pcmData);
-            session.totalAudioReceived += pcmData.length;
-          }
-        };
-
-        // Connect the audio processing pipeline
-        source.connect(processor);
-        
-        // Monitor AudioContext state
-        const stateCheck = setInterval(() => {
-          const state = audioContext.state;
-          logger.debug(`AudioContext state for ${connectionId}: ${state}`);
-          
-          // Auto-resume if suspended
-          if (state === 'suspended') {
-            logger.warn(`AudioContext suspended for ${connectionId}, attempting to resume...`);
-            audioContext.resume().catch(err => {
-              logger.error(`Failed to auto-resume AudioContext for ${connectionId}:`, err);
-            });
-          }
-          
-          if (state === 'closed') {
-            clearInterval(stateCheck);
-          }
-        }, 1000);
-
-        // Clean up when the track ends
-        audioTracks[0].onended = () => {
-          logger.info(`Audio track ended for ${connectionId}. Stats:
-            Total chunks processed: ${processedChunks}
-            Total bytes processed: ${totalBytesProcessed}
-            Processing duration: ${((Date.now() - lastProcessTime) / 1000).toFixed(1)}s`);
-
-          if (session.deepgramConnection) {
-            session.deepgramConnection.finish();
-          }
-          processor.disconnect();
-          source.disconnect();
-          audioContext.close();
-          clearInterval(stateCheck);
-          session.stream = undefined;
-          session.deepgramConnection = undefined;
-        };
-
-        logger.info(`Audio processing pipeline established for ${connectionId}`);
-      } catch (error) {
-        logger.error(`Error setting up audio processing for ${connectionId}:`, error);
         if (session.deepgramConnection) {
           session.deepgramConnection.finish();
           session.deepgramConnection = undefined;
         }
+        if (session.audioSink) {
+          session.audioSink.stop();
+          session.audioSink = undefined;
+        }
         session.stream = undefined;
-      }
+      };
+
+      logger.info(`Audio processing pipeline established for ${connectionId}`);
     } catch (error) {
       logger.error(`Error setting up audio processing for ${connectionId}:`, error);
       if (session.deepgramConnection) {
         session.deepgramConnection.finish();
         session.deepgramConnection = undefined;
+      }
+      if (session.audioSink) {
+        session.audioSink.stop();
+        session.audioSink = undefined;
       }
       session.stream = undefined;
     }
@@ -653,6 +604,17 @@ export class VoiceService extends EventEmitter {
 
     session.isListening = false;
     logger.info(`Stopped listening to ${connectionId}`);
+
+    // Clean up audio processing
+    if (session.audioSink) {
+      session.audioSink.stop();
+      session.audioSink = undefined;
+    }
+    if (session.deepgramConnection) {
+      session.deepgramConnection.finish();
+      session.deepgramConnection = undefined;
+    }
+
     this.webrtcService.sendMessage(connectionId, { type: 'listening-stopped' });
     
     // Process any collected audio
