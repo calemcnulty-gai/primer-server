@@ -3,7 +3,6 @@ import { DeepgramService, DeepgramConnection } from './DeepgramService';
 import { CartesiaService, CartesiaResponse } from './CartesiaService';
 import { WebRTCService, WebRTCMessage } from './WebRTCService';
 import { createLogger } from '../utils/logger';
-import { RTCAudioSink } from 'wrtc';
 
 const logger = createLogger('VoiceService');
 
@@ -15,7 +14,7 @@ interface AudioSession {
   totalAudioReceived: number; // Track total bytes received
   stream?: any;              // Active MediaStream
   deepgramConnection?: DeepgramConnection; // Active Deepgram connection
-  audioSink?: RTCAudioSink;  // RTCAudioSink for processing audio
+  audioSink?: any;  // RTCAudioSink for processing audio - use any type since we're requiring dynamically
 }
 
 export class VoiceService extends EventEmitter {
@@ -327,6 +326,30 @@ export class VoiceService extends EventEmitter {
       logger.info(`Processing audio stream for ${connectionId} with ${audioTracks.length} tracks`);
       logger.debug(`Audio track details: kind=${audioTracks[0].kind}, id=${audioTracks[0].id}, readyState=${audioTracks[0].readyState}, enabled=${audioTracks[0].enabled}`);
 
+      // Use require for wrtc with error handling
+      let wrtc;
+      try {
+        wrtc = require('wrtc');
+        if (!wrtc.RTCAudioSink) {
+          throw new Error('RTCAudioSink not found in wrtc module');
+        }
+        logger.debug(`RTCAudioSink accessed successfully from wrtc module`);
+      } catch (wrtcError) {
+        logger.error(`Failed to load RTCAudioSink from wrtc:`, wrtcError);
+        throw wrtcError;
+      }
+
+      // Create RTCAudioSink with error handling
+      let audioSink;
+      try {
+        audioSink = new wrtc.RTCAudioSink(audioTracks[0]);
+        logger.debug(`RTCAudioSink created successfully for track ${audioTracks[0].id}`);
+      } catch (sinkError) {
+        logger.error(`Failed to create RTCAudioSink:`, sinkError);
+        throw sinkError;
+      }
+      session.audioSink = audioSink;
+
       // Create Deepgram connection
       const deepgramConnection = this.deepgramService.createConnection({
         model: "nova-2",
@@ -338,10 +361,6 @@ export class VoiceService extends EventEmitter {
         channels: 1
       });
       session.deepgramConnection = deepgramConnection;
-
-      // Create RTCAudioSink for direct PCM extraction
-      const audioSink = new RTCAudioSink(audioTracks[0]);
-      session.audioSink = audioSink;
 
       // Track processing metrics
       let processedChunks = 0;
@@ -365,7 +384,13 @@ export class VoiceService extends EventEmitter {
         const timeSinceLastProcess = now - lastProcessTime;
         lastProcessTime = now;
 
-        const float32Data = event.samples; // Float32Array from WebRTC
+        // Ensure we have valid audio data
+        if (!event.samples || !event.samples.length) {
+          logger.warn(`Received empty audio data from RTCAudioSink for ${connectionId}`);
+          return;
+        }
+
+        const float32Data = event.samples;
         const pcmData = Buffer.alloc(float32Data.length * 2);
 
         // Audio level analysis
@@ -410,8 +435,12 @@ export class VoiceService extends EventEmitter {
 
         // Send to Deepgram if not prolonged silence
         if (!isSilent || silentChunksCount < 20) { // Skip after ~2 seconds of silence
-          session.deepgramConnection.send(pcmData);
-          session.totalAudioReceived += pcmData.length;
+          try {
+            session.deepgramConnection.send(pcmData);
+            session.totalAudioReceived += pcmData.length;
+          } catch (sendError) {
+            logger.error(`Failed to send audio data to Deepgram for ${connectionId}:`, sendError);
+          }
         }
       };
 
