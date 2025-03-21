@@ -230,7 +230,13 @@ export class VoiceService extends EventEmitter {
     }
     
     // Skip very small chunks (likely heartbeats or control messages)
+    if (audioChunk.length < 2) {
+      // This is likely a keep-alive ping (0-byte packet), silently handle it
+      return;
+    }
+    
     if (audioChunk.length < 50) {
+      logger.debug(`Small audio packet received, likely control data: ${audioChunk.length} bytes`);
       return;
     }
     

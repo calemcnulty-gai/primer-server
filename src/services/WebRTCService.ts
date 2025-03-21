@@ -15,6 +15,7 @@ export interface RTCConnectionState {
   messagesSent: number;
   statsInterval?: NodeJS.Timeout;
   connected: boolean;      // Whether the WebRTC connection is active
+  keepAliveInterval?: NodeJS.Timeout;
 }
 
 export interface WebRTCMessage {
@@ -207,14 +208,24 @@ export class WebRTCService extends EventEmitter {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
     
+    // Always update the last activity timestamp for any message
+    connection.lastActivity = Date.now();
+    
     try {
       const data = JSON.parse(message);
       
       // Enhanced debugging for all messages
-      logger.info(`WebSocket message received from ${connectionId}: type=${data.type}, size=${message.length}`);
+      if (data.type !== 'ping' && data.type !== 'heartbeat') {
+        logger.info(`WebSocket message received from ${connectionId}: type=${data.type}, size=${message.length}`);
+      } else {
+        // Just log heartbeats and pings at debug level
+        logger.debug(`WebSocket heartbeat received from ${connectionId}: type=${data.type}`);
+      }
       
-      // Forward client messages to listeners
-      this.emit('message', connectionId, data);
+      // Forward client messages to listeners (except for pings/heartbeats)
+      if (data.type !== 'ping' && data.type !== 'heartbeat') {
+        this.emit('message', connectionId, data);
+      }
       
       // Handle WebRTC signaling
       switch (data.type) {
@@ -233,8 +244,10 @@ export class WebRTCService extends EventEmitter {
           
         case 'heartbeat':
         case 'ping':
+          // Always respond to heartbeats and pings immediately to keep connection alive
           this.sendMessage(connectionId, { 
-            type: data.type === 'heartbeat' ? 'heartbeat-ack' : 'pong' 
+            type: data.type === 'heartbeat' ? 'heartbeat-ack' : 'pong',
+            timestamp: Date.now()
           });
           break;
           
@@ -293,6 +306,42 @@ export class WebRTCService extends EventEmitter {
           // We can't modify peer.connected as it's read-only
         }
         
+        // Set up keep-alive pings to maintain WebRTC connection
+        const keepAliveInterval = setInterval(() => {
+          if (connection.connected && peer && peer._pc) {
+            try {
+              // Send a small keep-alive packet if no data was sent recently
+              const timeSinceLastActivity = Date.now() - connection.lastActivity;
+              if (timeSinceLastActivity > 5000) {
+                logger.debug(`Sending keep-alive for ${connectionId}, ${timeSinceLastActivity}ms since activity`);
+                
+                // Try to send a WebRTC data channel ping if possible
+                if (peer.connected) {
+                  try {
+                    peer.send(Buffer.from([0])); // Empty ping packet
+                  } catch (sendErr) {
+                    // If data channel doesn't work, use WebSocket for keep-alive
+                    this.sendMessage(connectionId, { type: 'ping', timestamp: Date.now() });
+                  }
+                } else {
+                  // Fall back to WebSocket for keep-alive
+                  this.sendMessage(connectionId, { type: 'ping', timestamp: Date.now() });
+                }
+                
+                connection.lastActivity = Date.now();
+              }
+            } catch (pingErr) {
+              logger.error(`Error sending keep-alive to ${connectionId}:`, pingErr);
+            }
+          } else {
+            // Stop interval if connection is gone
+            clearInterval(keepAliveInterval);
+          }
+        }, 5000);
+        
+        // Store interval for cleanup
+        connection.keepAliveInterval = keepAliveInterval;
+        
         // Notify that the connection is ready
         this.emit('connection:ready', connectionId);
         
@@ -301,6 +350,9 @@ export class WebRTCService extends EventEmitter {
       });
       
       peer.on('data', (chunk: Buffer) => {
+        // Update last activity timestamp
+        connection.lastActivity = Date.now();
+        
         // Forward received data to listeners
         this.emit('data', connectionId, chunk);
       });
@@ -315,6 +367,11 @@ export class WebRTCService extends EventEmitter {
         if (connection.state !== 'closed') {
           connection.state = 'closed';
           connection.connected = false;
+          
+          // Clear keep-alive interval if it exists
+          if (connection.keepAliveInterval) {
+            clearInterval(connection.keepAliveInterval);
+          }
           
           // Emit closed event
           this.emit('connection:closed', connectionId);
@@ -402,6 +459,25 @@ export class WebRTCService extends EventEmitter {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
     
+    // Log connection state before closing for debugging
+    try {
+      const peer = connection.peer;
+      const peerConn = peer?._pc;
+      
+      logger.info(`Connection closing for ${connectionId}: 
+        State: ${connection.state}, 
+        Connected: ${connection.connected ? 'yes' : 'no'}, 
+        Peer State: ${peerConn?.connectionState || 'unknown'}, 
+        ICE State: ${peerConn?.iceConnectionState || 'unknown'}, 
+        Signaling State: ${peerConn?.signalingState || 'unknown'}, 
+        Messages Received: ${connection.messagesReceived}, 
+        Messages Sent: ${connection.messagesSent},
+        Age: ${Date.now() - connection.lastActivity}ms
+      `);
+    } catch (logErr) {
+      logger.error(`Error logging connection state for ${connectionId}:`, logErr);
+    }
+    
     // Clean up peer connection
     if (connection.peer) {
       try {
@@ -414,6 +490,10 @@ export class WebRTCService extends EventEmitter {
     // Clear intervals
     if (connection.statsInterval) {
       clearInterval(connection.statsInterval);
+    }
+    
+    if (connection.keepAliveInterval) {
+      clearInterval(connection.keepAliveInterval);
     }
     
     logger.info(`Connection closed: ${connectionId}`);
