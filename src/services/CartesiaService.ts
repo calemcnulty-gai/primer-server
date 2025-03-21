@@ -8,17 +8,20 @@ dotenv.config();
 
 const logger = createLogger('CartesiaService');
 
+type RawEncoding = 'pcm_f32le' | 'pcm_s16le' | 'pcm_mulaw' | 'pcm_alaw';
+type SupportedLanguage = 'en' | 'fr' | 'de' | 'es' | 'pt' | 'zh' | 'ja' | 'hi' | 'it' | 'ko' | 'nl' | 'pl' | 'ru' | 'sv' | 'tr';
+
 export interface StreamingTtsOptions {
   modelId?: string;
   voice?: {
     mode: 'id';
     id: string;
   };
-  language?: string;
+  language?: SupportedLanguage;
   outputFormat?: {
-    container: 'mp3' | 'wav' | 'raw';
+    container: 'raw' | 'wav' | 'mp3';
     sampleRate: number;
-    encoding?: string;
+    encoding?: RawEncoding;
     bitRate?: number;
   };
 }
@@ -113,40 +116,41 @@ export class CartesiaService extends EventEmitter {
       const startTime = new Date();
       logger.info(`[${requestId}] [${startTime.toISOString()}] Starting streaming TTS: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
       
-      // Default options optimized for PCM streaming (Linear16)
-      const defaultOptions: StreamingTtsOptions = {
-        modelId: this.modelId,
-        voice: {
+      // Create base request object
+      const ttsRequest: any = {
+        modelId: options.modelId || this.modelId,
+        transcript: text,
+        voice: options.voice || {
           mode: 'id',
           id: this.defaultVoiceId
         },
-        language: 'en',
-        outputFormat: {
-          container: 'raw',
-          sampleRate: 16000, // Match client-side expectation: 16kHz
-          encoding: 'pcm_s16le' // 16-bit PCM, little-endian (Linear16)
-        }
+        language: options.language || 'en'
       };
-
-      // Merge with user options
-      const mergedOptions = { ...defaultOptions, ...options };
+      
+      // Add output format based on container type
+      if (options.outputFormat?.container === 'mp3') {
+        ttsRequest.outputFormat = {
+          container: 'mp3',
+          sampleRate: options.outputFormat.sampleRate || 16000,
+          bitRate: options.outputFormat.bitRate || 128000
+        };
+      } else if (options.outputFormat?.container === 'wav') {
+        ttsRequest.outputFormat = {
+          container: 'wav',
+          encoding: options.outputFormat.encoding || 'pcm_s16le',
+          sampleRate: options.outputFormat.sampleRate || 16000
+        };
+      } else {
+        // Default to raw PCM
+        ttsRequest.outputFormat = {
+          container: 'raw',
+          encoding: options.outputFormat?.encoding || 'pcm_s16le',
+          sampleRate: options.outputFormat?.sampleRate || 16000
+        };
+      }
       
       // Create TTS streaming request using the SDK
-      // @ts-ignore - Ignore type mismatch which we'll handle in the processing
-      const stream = await this.client.tts.sse({
-        modelId: mergedOptions.modelId || this.modelId,
-        transcript: text,
-        voice: mergedOptions.voice || {
-          mode: 'id',
-          id: this.defaultVoiceId
-        },
-        outputFormat: mergedOptions.outputFormat || {
-          container: 'raw',
-          sampleRate: 16000,
-          encoding: 'pcm_s16le'
-        },
-        language: mergedOptions.language || 'en'
-      });
+      const stream = await this.client.tts.sse(ttsRequest);
 
       // Emit the stream start event
       this.emit('streamStart', { requestId, timestamp: new Date().toISOString() });
