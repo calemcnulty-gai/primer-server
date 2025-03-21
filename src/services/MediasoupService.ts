@@ -39,18 +39,7 @@ const config = {
   worker: {
     logLevel: 'debug' as mediasoup.types.WorkerLogLevel,
     logTags: [
-      'info',
-      'ice',
-      'dtls',
-      'rtp',
-      'srtp',
-      'rtcp',
-      'rtx',
-      'bwe',
-      'score',
-      'simulcast',
-      'svc',
-      'sctp'
+      'info', 'ice', 'dtls', 'rtp', 'srtp', 'rtcp', 'rtx', 'bwe', 'score', 'simulcast', 'svc', 'sctp'
     ] as mediasoup.types.WorkerLogTag[],
     rtcMinPort: 40000,
     rtcMaxPort: 49999,
@@ -62,13 +51,10 @@ const config = {
         mimeType: 'audio/opus',
         clockRate: 48000,
         channels: 2,
-        parameters: {
-          minptime: 10,
-          useinbandfec: 1
-        }
-      }
-    ]
-  }
+        parameters: { minptime: 10, useinbandfec: 1 },
+      },
+    ],
+  },
 };
 
 interface Peer {
@@ -98,22 +84,20 @@ export class MediasoupService extends EventEmitter {
 
   private async initialize(): Promise<void> {
     try {
-      logger.info('Initializing mediasoup worker with config:', config.worker);
-      
+      logger.info('Initializing mediasoup worker');
       this.worker = await mediasoup.createWorker(config.worker);
 
       this.worker.on('died', (error) => {
-        logger.error('mediasoup worker died', error);
+        logger.error('Mediasoup worker died:', error);
         this.status = 'error';
         setTimeout(() => {
-          logger.info('Attempting to restart mediasoup worker...');
+          logger.info('Restarting mediasoup worker...');
           this.initialize();
         }, 2000);
       });
 
-      logger.info('mediasoup worker created successfully');
+      logger.info('Mediasoup worker running');
       this.status = 'running';
-
     } catch (error) {
       logger.error('Failed to initialize mediasoup worker:', error);
       this.status = 'error';
@@ -126,14 +110,12 @@ export class MediasoupService extends EventEmitter {
       throw new Error('MediasoupService not ready');
     }
 
-    logger.info(`New WebSocket connection from peer ${peerId}`);
+    logger.info(`New WebSocket connection: ${peerId}`);
 
     try {
-      // Create router for this peer
       const router = await this.worker.createRouter(config.router);
-      logger.info(`Created router for peer ${peerId} with capabilities:`, router.rtpCapabilities);
+      logger.debug(`Router created for peer ${peerId}`);
 
-      // Initialize peer state
       const peer: Peer = {
         id: peerId,
         ws,
@@ -141,40 +123,16 @@ export class MediasoupService extends EventEmitter {
         transports: new Map(),
         producers: new Map(),
         consumers: new Map(),
-        data: {
-          joined: false
-        }
+        data: { joined: false },
       };
 
       this.peers.set(peerId, peer);
 
-      // Handle WebSocket messages
-      ws.on('message', async (message: RawData) => {
-        try {
-          const parsedMessage = JSON.parse(message.toString());
-          await this.handleRequest(peer, parsedMessage);
-        } catch (error) {
-          logger.error(`Error processing message from peer ${peerId}:`, error);
-          this.sendError(peer, {
-            message: error instanceof Error ? error.message : 'Internal error',
-            code: 500
-          });
-        }
-      });
+      ws.on('message', (message: RawData) => this.handleRequest(peer, message));
+      ws.on('close', () => this.handlePeerDisconnection(peer));
+      ws.on('error', (error) => logger.error(`WebSocket error for ${peerId}:`, error));
 
-      // Handle WebSocket closure
-      ws.on('close', () => {
-        logger.info(`WebSocket closed for peer ${peerId}`);
-        this.handlePeerDisconnection(peer);
-      });
-
-      // Handle WebSocket errors
-      ws.on('error', (error) => {
-        logger.error(`WebSocket error for peer ${peerId}:`, error);
-      });
-
-      logger.info(`Peer ${peerId} initialized successfully`);
-
+      logger.info(`Peer ${peerId} initialized`);
     } catch (error) {
       logger.error(`Failed to initialize peer ${peerId}:`, error);
       ws.close();
@@ -182,390 +140,212 @@ export class MediasoupService extends EventEmitter {
     }
   }
 
-  private async handleRequest(peer: Peer, request: Request): Promise<void> {
-    const { id, method, data } = request;
+  private async handleRequest(peer: Peer, message: RawData): Promise<void> {
+    let request: Request;
+    try {
+      request = JSON.parse(message.toString());
+    } catch (error) {
+      logger.error(`Invalid message from ${peer.id}:`, error);
+      return;
+    }
 
-    logger.debug('Received request', { peerId: peer.id, method, id, data });
+    const { id, method, data } = request;
+    logger.debug(`Request from ${peer.id}: ${method} (id: ${id})`);
 
     try {
       let responseData: any;
-
       switch (method) {
         case 'getRouterRtpCapabilities':
           responseData = await this.handleGetRouterRtpCapabilities(peer);
           break;
-
         case 'createWebRtcTransport':
           responseData = await this.handleCreateWebRtcTransport(peer);
           break;
-
         case 'connectWebRtcTransport':
-          await this.handleConnectWebRtcTransport(peer, data);
-          responseData = { connected: true };
+          responseData = await this.handleConnectWebRtcTransport(peer, data);
           break;
-
         case 'produce':
           responseData = await this.handleProduce(peer, data);
           break;
-
         case 'consume':
           responseData = await this.handleConsume(peer, data);
           break;
-
         default:
-          throw new Error(`Unknown method ${method}`);
+          throw new Error(`Unknown method: ${method}`);
       }
 
-      const response: Response = {
-        response: true,
-        id,
-        ok: true,
-        data: responseData
-      };
-
-      this.sendMessage(peer, response);
+      this.sendMessage(peer, { response: true, id, ok: true, data: responseData });
     } catch (error) {
-      logger.error(`Request failed [${method}]:`, error);
-      this.sendError(peer, {
-        code: error instanceof Error ? 500 : 400,
-        message: error instanceof Error ? error.message : String(error)
-      }, id);
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Request [${method}] failed for ${peer.id}: ${message}`);
+      this.sendError(peer, { code: 500, message }, id);
     }
   }
 
   private async handleGetRouterRtpCapabilities(peer: Peer): Promise<mediasoup.types.RtpCapabilities> {
-    logger.info(`Getting router RTP capabilities for peer ${peer.id}`);
+    logger.debug(`Providing RTP capabilities for ${peer.id}`);
     return peer.router!.rtpCapabilities;
   }
 
   private async handleCreateWebRtcTransport(peer: Peer): Promise<any> {
-    if (!peer.router) {
-      throw new Error('Router not initialized');
-    }
+    if (!peer.router) throw new Error('Router not initialized');
 
-    logger.info(`Creating WebRTC transport for peer ${peer.id}`);
+    logger.info(`Creating WebRTC transport for ${peer.id}`);
 
-    try {
-      const transport = await peer.router.createWebRtcTransport({
-        listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
-        enableUdp: true,
-        enableTcp: true,
-        preferUdp: true,
-        initialAvailableOutgoingBitrate: 800000
-      });
+    const transport = await peer.router.createWebRtcTransport({
+      listenIps: [{ ip: '44.218.104.132', announcedIp: null }], // TODO: Make configurable
+      enableUdp: true,
+      enableTcp: true,
+      preferUdp: true,
+      initialAvailableOutgoingBitrate: 800000,
+    });
 
-      // Store transport
-      peer.transports.set(transport.id, transport);
+    peer.transports.set(transport.id, transport);
 
-      // Monitor transport state
-      transport.observer.on('close', () => {
-        logger.info('Transport closed', { transportId: transport.id });
-        peer.transports.delete(transport.id);
-      });
+    transport.on('dtlsstatechange', (state) =>
+      logger.debug(`Transport ${transport.id} DTLS state: ${state}`)
+    );
+    transport.on('icestatechange', (state) =>
+      logger.debug(`Transport ${transport.id} ICE state: ${state}`)
+    );
+    transport.on('@close', () => {
+      logger.info(`Transport ${transport.id} closed`);
+      peer.transports.delete(transport.id);
+    });
 
-      transport.observer.on('newproducer', (producer) => {
-        logger.info('New producer', { producerId: producer.id });
-      });
-
-      transport.observer.on('newconsumer', (consumer) => {
-        logger.info('New consumer', { consumerId: consumer.id });
-      });
-
-      // Return only the data needed by the client
-      return {
-        id: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters
-      };
-
-    } catch (error) {
-      logger.error('Failed to create WebRTC transport:', error);
-      throw error;
-    }
+    return {
+      id: transport.id,
+      iceParameters: transport.iceParameters,
+      iceCandidates: transport.iceCandidates,
+      dtlsParameters: transport.dtlsParameters,
+    };
   }
 
-  private async handleConnectWebRtcTransport(peer: Peer, data: any): Promise<void> {
+  private async handleConnectWebRtcTransport(peer: Peer, data: any): Promise<{ connected: boolean }> {
     const { transportId, dtlsParameters } = data;
     const transport = peer.transports.get(transportId);
 
-    if (!transport) {
-      throw new Error(`Transport not found: ${transportId}`);
+    if (!transport) throw new Error(`Transport ${transportId} not found`);
+
+    logger.info(`Connecting transport ${transportId}`);
+
+    await transport.connect({ dtlsParameters });
+    logger.info(`Transport ${transportId} connected`, {
+      dtlsState: transport.dtlsState,
+      iceState: transport.iceState,
+    });
+
+    // Wait briefly for state to stabilize (optional, adjust as needed)
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    if (transport.dtlsState !== 'connected' || transport.iceState !== 'completed') {
+      throw new Error(`Transport ${transportId} not fully connected (DTLS: ${transport.dtlsState}, ICE: ${transport.iceState})`);
     }
 
-    logger.info('Connecting transport', { transportId, dtlsParameters });
-
-    try {
-      await transport.connect({ dtlsParameters });
-      logger.info('Transport connected successfully', { 
-        transportId,
-        dtlsState: transport.dtlsState,
-        iceState: transport.iceState
-      });
-    } catch (error) {
-      logger.error('Failed to connect transport:', error);
-      throw error;
-    }
+    return { connected: true };
   }
 
-  private async handleProduce(peer: Peer, data: any): Promise<any> {
+  private async handleProduce(peer: Peer, data: any): Promise<{ id: string }> {
     const { transportId, kind, rtpParameters } = data;
     const transport = peer.transports.get(transportId);
 
-    if (!transport) {
-      throw new Error(`Transport not found: ${transportId}`);
+    if (!transport) throw new Error(`Transport ${transportId} not found`);
+    if (transport.dtlsState !== 'connected' || transport.iceState !== 'completed') {
+      throw new Error(`Transport ${transportId} not fully connected (DTLS: ${transport.dtlsState}, ICE: ${transport.iceState})`);
     }
 
-    if (transport.dtlsState !== 'connected') {
-      throw new Error('Transport not connected');
-    }
+    logger.info(`Producing ${kind} on transport ${transportId} for ${peer.id}`);
 
-    logger.info('Creating producer', { 
-      peerId: peer.id,
-      transportId, 
-      kind,
-      rtpParameters: {
-        ...rtpParameters,
-        codecs: rtpParameters.codecs.map((codec: any) => ({
-          ...codec,
-          parameters: codec.parameters
-        }))
-      }
+    const producer = await transport.produce({ kind, rtpParameters });
+    peer.producers.set(producer.id, producer);
+
+    producer.on('transportclose', () => {
+      logger.info(`Producer ${producer.id} closed due to transport`);
+      peer.producers.delete(producer.id);
     });
 
-    try {
-      const producer = await transport.produce({
-        kind,
-        rtpParameters
-      });
+    logger.info(`Producer ${producer.id} created for ${peer.id}`);
 
-      peer.producers.set(producer.id, producer);
-
-      // Enhanced producer event logging
-      producer.observer.on('close', () => {
-        logger.info('Producer closed', { 
-          peerId: peer.id,
-          producerId: producer.id,
-          kind: producer.kind
-        });
-        peer.producers.delete(producer.id);
-      });
-
-      producer.observer.on('pause', () => {
-        logger.info('Producer paused', {
-          peerId: peer.id,
-          producerId: producer.id,
-          kind: producer.kind
-        });
-      });
-
-      producer.observer.on('resume', () => {
-        logger.info('Producer resumed', {
-          peerId: peer.id,
-          producerId: producer.id,
-          kind: producer.kind
-        });
-      });
-
-      // Log successful producer creation
-      logger.info('Producer created successfully', {
-        peerId: peer.id,
-        producerId: producer.id,
-        kind: producer.kind,
-        type: producer.type,
-        paused: producer.paused
-      });
-
-      return { id: producer.id };
-
-    } catch (error) {
-      logger.error('Failed to create producer:', {
-        peerId: peer.id,
-        transportId,
-        kind,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      throw error;
-    }
+    return { id: producer.id };
   }
 
   private async handleConsume(peer: Peer, data: any): Promise<any> {
     const { transportId, producerId, rtpCapabilities } = data;
     const transport = peer.transports.get(transportId);
 
-    if (!transport) {
-      throw new Error(`Transport not found: ${transportId}`);
+    if (!transport) throw new Error(`Transport ${transportId} not found`);
+    if (transport.dtlsState !== 'connected' || transport.iceState !== 'completed') {
+      throw new Error(`Transport ${transportId} not fully connected`);
     }
 
     if (!peer.router?.canConsume({ producerId, rtpCapabilities })) {
-      logger.warn('Cannot consume producer', {
-        peerId: peer.id,
-        transportId,
-        producerId,
-        reason: 'Incompatible RTP capabilities'
-      });
       throw new Error('Cannot consume this producer');
     }
 
-    logger.info('Creating consumer', {
-      peerId: peer.id,
-      transportId,
+    logger.info(`Consuming producer ${producerId} for ${peer.id}`);
+
+    const consumer = await transport.consume({
       producerId,
-      rtpCapabilities: {
-        codecs: rtpCapabilities.codecs.map((codec: any) => ({
-          ...codec,
-          parameters: codec.parameters
-        }))
-      }
+      rtpCapabilities,
+      paused: true,
     });
 
-    try {
-      const consumer = await transport.consume({
-        producerId,
-        rtpCapabilities,
-        paused: true // Start paused
-      });
+    peer.consumers.set(consumer.id, consumer);
 
-      peer.consumers.set(consumer.id, consumer);
+    consumer.on('transportclose', () => {
+      logger.info(`Consumer ${consumer.id} closed due to transport`);
+      peer.consumers.delete(consumer.id);
+    });
+    consumer.on('producerclose', () => {
+      logger.info(`Consumer ${consumer.id} closed due to producer`);
+      peer.consumers.delete(consumer.id);
+      this.sendNotification(peer, 'producerClosed', { consumerId: consumer.id });
+    });
 
-      // Enhanced consumer event logging
-      consumer.on('transportclose', () => {
-        logger.info('Consumer transport closed', {
-          peerId: peer.id,
-          consumerId: consumer.id,
-          kind: consumer.kind
-        });
-        peer.consumers.delete(consumer.id);
-      });
+    logger.info(`Consumer ${consumer.id} created for ${peer.id}`);
 
-      consumer.on('producerclose', () => {
-        logger.info('Consumer producer closed', {
-          peerId: peer.id,
-          consumerId: consumer.id,
-          kind: consumer.kind
-        });
-        peer.consumers.delete(consumer.id);
-        this.sendNotification(peer, 'producerClosed', { consumerId: consumer.id });
-      });
-
-      consumer.on('producerpause', () => {
-        logger.info('Producer paused - consumer affected', {
-          peerId: peer.id,
-          consumerId: consumer.id,
-          kind: consumer.kind
-        });
-      });
-
-      consumer.on('producerresume', () => {
-        logger.info('Producer resumed - consumer affected', {
-          peerId: peer.id,
-          consumerId: consumer.id,
-          kind: consumer.kind
-        });
-      });
-
-      consumer.on('score', (score) => {
-        // Only log significant score changes to avoid spam
-        if (score.score < 5) { // Log poor scores
-          logger.warn('Consumer score is poor', {
-            peerId: peer.id,
-            consumerId: consumer.id,
-            score: score.score,
-            producerScore: score.producerScore,
-            producerScores: score.producerScores
-          });
-        } else if (score.score < 7) { // Log mediocre scores
-          logger.info('Consumer score is mediocre', {
-            peerId: peer.id,
-            consumerId: consumer.id,
-            score: score.score
-          });
-        }
-      });
-
-      logger.info('Consumer created successfully', {
-        peerId: peer.id,
-        consumerId: consumer.id,
-        kind: consumer.kind,
-        type: consumer.type,
-        producerPaused: consumer.producerPaused,
-        rtpParameters: {
-          codecs: consumer.rtpParameters.codecs.map(codec => ({
-            ...codec,
-            parameters: codec.parameters
-          }))
-        }
-      });
-
-      return {
-        id: consumer.id,
-        producerId,
-        kind: consumer.kind,
-        rtpParameters: consumer.rtpParameters,
-        type: consumer.type,
-        producerPaused: consumer.producerPaused
-      };
-
-    } catch (error) {
-      logger.error('Failed to create consumer:', {
-        peerId: peer.id,
-        transportId,
-        producerId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      throw error;
-    }
+    return {
+      id: consumer.id,
+      producerId,
+      kind: consumer.kind,
+      rtpParameters: consumer.rtpParameters,
+      type: consumer.type,
+      producerPaused: consumer.producerPaused,
+    };
   }
 
   private handlePeerDisconnection(peer: Peer): void {
-    logger.info(`Cleaning up peer ${peer.id}`);
+    logger.info(`Disconnecting peer ${peer.id}`);
 
-    // Close all transports (this will also close producers and consumers)
-    for (const transport of peer.transports.values()) {
-      transport.close();
-    }
-
-    // Close the router
+    for (const transport of peer.transports.values()) transport.close();
     peer.router?.close();
-
-    // Remove the peer
     this.peers.delete(peer.id);
 
-    logger.info(`Peer ${peer.id} cleaned up`);
+    logger.info(`Peer ${peer.id} disconnected`);
   }
 
   private sendMessage(peer: Peer, message: Response | ErrorResponse | Notification): void {
     try {
       peer.ws.send(JSON.stringify(message));
     } catch (error) {
-      logger.error(`Failed to send message to peer ${peer.id}:`, error);
+      logger.error(`Failed to send message to ${peer.id}:`, error);
     }
   }
 
-  private sendError(peer: Peer, error: { message: string, code: number }, requestId?: number): void {
-    try {
-      const errorResponse: ErrorResponse = {
-        response: true,
-        id: requestId || 0,
-        ok: false,
-        error
-      };
-      peer.ws.send(JSON.stringify(errorResponse));
-    } catch (err) {
-      logger.error(`Failed to send error to peer ${peer.id}:`, err);
-    }
+  private sendError(peer: Peer, error: { message: string; code: number }, requestId?: number): void {
+    this.sendMessage(peer, {
+      response: true,
+      id: requestId || 0,
+      ok: false,
+      error,
+    });
   }
 
   private sendNotification(peer: Peer, method: string, data?: any): void {
-    const notification: Notification = {
-      notification: true,
-      method,
-      data
-    };
-    this.sendMessage(peer, notification);
+    this.sendMessage(peer, { notification: true, method, data });
   }
 
   public getStatus(): string {
     return this.status;
   }
-} 
+}
