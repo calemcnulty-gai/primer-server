@@ -28,7 +28,13 @@ export class DeepgramService extends EventEmitter {
   private streamingUrl: string;
   private debugMode: boolean;
   private debugDir: string;
-
+  private audioBuffer: Buffer | null = null;
+  private bufferSize: number = 0;
+  private minDurationForSave: number = 2000; // 2 seconds in ms
+  private sampleRate: number = 16000;
+  private channels: number = 1;
+  private bytesPerSample: number = 2;  // 16-bit PCM
+  
   constructor() {
     super();
     this.apiKey = process.env.DEEPGRAM_API_KEY || '';
@@ -57,35 +63,130 @@ export class DeepgramService extends EventEmitter {
   }
 
   /**
-   * Save audio data to file for debugging
-   * @param audioData Audio buffer to save
-   * @returns Path to saved file or null if saving failed
+   * Convert PCM data to WAV format with proper headers
+   * @param pcmData PCM audio buffer (16-bit, little-endian)
+   * @param sampleRate Sample rate in Hz (default: 16000)
+   * @param channels Number of channels (default: 1)
+   * @returns WAV formatted buffer
    */
-  private saveAudioForDebug(audioData: Buffer): string | null {
+  private pcmToWav(pcmData: Buffer, sampleRate: number = 16000, channels: number = 1): Buffer {
+    // WAV header is 44 bytes
+    const headerSize = 44;
+    const dataSize = pcmData.length;
+    const fileSize = headerSize + dataSize;
+    const wavBuffer = Buffer.alloc(fileSize);
+    
+    // Write WAV header
+    // RIFF header
+    wavBuffer.write('RIFF', 0);                                // ChunkID
+    wavBuffer.writeUInt32LE(fileSize - 8, 4);                  // ChunkSize
+    wavBuffer.write('WAVE', 8);                                // Format
+    
+    // fmt sub-chunk
+    wavBuffer.write('fmt ', 12);                               // Subchunk1ID
+    wavBuffer.writeUInt32LE(16, 16);                           // Subchunk1Size (16 for PCM)
+    wavBuffer.writeUInt16LE(1, 20);                            // AudioFormat (1 for PCM)
+    wavBuffer.writeUInt16LE(channels, 22);                     // NumChannels
+    wavBuffer.writeUInt32LE(sampleRate, 24);                   // SampleRate
+    wavBuffer.writeUInt32LE(sampleRate * channels * 2, 28);    // ByteRate (SampleRate * NumChannels * BytesPerSample)
+    wavBuffer.writeUInt16LE(channels * 2, 32);                 // BlockAlign (NumChannels * BytesPerSample)
+    wavBuffer.writeUInt16LE(16, 34);                           // BitsPerSample
+    
+    // data sub-chunk
+    wavBuffer.write('data', 36);                               // Subchunk2ID
+    wavBuffer.writeUInt32LE(dataSize, 40);                     // Subchunk2Size
+    
+    // Copy PCM data
+    pcmData.copy(wavBuffer, headerSize);
+    
+    return wavBuffer;
+  }
+
+  /**
+   * Calculate the duration of PCM audio in milliseconds
+   * @param pcmData PCM audio buffer
+   * @param bytesPerSample Bytes per sample (2 for 16-bit)
+   * @param sampleRate Sample rate in Hz
+   * @param channels Number of channels
+   * @returns Duration in milliseconds
+   */
+  private calculatePcmDuration(
+    pcmData: Buffer, 
+    bytesPerSample: number = 2,
+    sampleRate: number = 16000,
+    channels: number = 1
+  ): number {
+    const samples = pcmData.length / (bytesPerSample * channels);
+    return (samples / sampleRate) * 1000;
+  }
+
+  /**
+   * Add audio data to the buffer and save if threshold is reached
+   * @param audioData New audio data to buffer
+   * @param forceWrite Force write to disk even if below threshold
+   * @returns Path to saved file or null
+   */
+  private bufferAudioForDebug(audioData: Buffer, forceWrite: boolean = false): string | null {
     if (!this.debugMode) return null;
     
     try {
-      // Generate a unique filename with timestamp and random string
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const randomId = crypto.randomBytes(4).toString('hex');
-      const filename = `deepgram_audio_${timestamp}_${randomId}.pcm`;
-      const filePath = path.join(this.debugDir, filename);
+      // Initialize buffer if needed
+      if (!this.audioBuffer) {
+        this.audioBuffer = audioData;
+        this.bufferSize = audioData.length;
+      } else {
+        // Append to existing buffer
+        const newBuffer = Buffer.alloc(this.bufferSize + audioData.length);
+        this.audioBuffer.copy(newBuffer, 0);
+        audioData.copy(newBuffer, this.bufferSize);
+        this.audioBuffer = newBuffer;
+        this.bufferSize += audioData.length;
+      }
       
-      // Write the audio buffer to file
-      fs.writeFileSync(filePath, audioData);
-      logger.info(`Saved audio sample to ${filePath} (${audioData.length} bytes)`);
+      // Calculate current buffer duration
+      const bufferDuration = this.calculatePcmDuration(
+        this.audioBuffer, 
+        this.bytesPerSample,
+        this.sampleRate,
+        this.channels
+      );
       
-      // Calculate and log audio duration (assuming 16kHz, 16-bit mono)
-      const durationSeconds = audioData.length / (16000 * 2);
-      logger.info(`Audio duration: ${durationSeconds.toFixed(2)} seconds (${(durationSeconds * 1000).toFixed(0)}ms)`);
+      logger.debug(`Audio buffer: ${this.bufferSize} bytes, ${bufferDuration.toFixed(1)}ms`);
       
-      // Log first 32 bytes in hex for debugging
-      const hex = audioData.slice(0, 32).toString('hex');
-      logger.info(`First 32 bytes: ${hex.match(/../g)?.join(' ')}`);
+      // Save to disk if exceeds minimum duration or force write
+      if (bufferDuration >= this.minDurationForSave || forceWrite) {
+        // Generate a unique filename with timestamp
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const randomId = crypto.randomBytes(4).toString('hex');
+        const filename = `deepgram_audio_${timestamp}_${randomId}.wav`;
+        const filePath = path.join(this.debugDir, filename);
+        
+        // Convert PCM to WAV
+        const wavBuffer = this.pcmToWav(this.audioBuffer, this.sampleRate, this.channels);
+        
+        // Write to file
+        fs.writeFileSync(filePath, wavBuffer);
+        
+        logger.info(`Saved audio sample to ${filePath} (${this.bufferSize} bytes PCM, ${bufferDuration.toFixed(1)}ms)`);
+        
+        // Analyze first 32 bytes of PCM data
+        if (this.audioBuffer.length >= 32) {
+          const hex = this.audioBuffer.slice(0, 32).toString('hex');
+          logger.info(`First 32 bytes of PCM: ${hex.match(/../g)?.join(' ')}`);
+        }
+        
+        // Reset buffer
+        this.audioBuffer = null;
+        this.bufferSize = 0;
+        
+        return filePath;
+      }
       
-      return filePath;
+      return null;
     } catch (error) {
-      logger.error('Failed to save audio for debugging:', error);
+      logger.error('Failed to buffer audio for debugging:', error);
+      this.audioBuffer = null;
+      this.bufferSize = 0;
       return null;
     }
   }
@@ -102,16 +203,25 @@ export class DeepgramService extends EventEmitter {
     
     // Assuming 16-bit PCM (linear16)
     const samples = audioData.length / 2;
-    const durationMs = (samples / 16000) * 1000;
+    const durationMs = (samples / this.sampleRate) * 1000;
     
     // Calculate some basic audio stats
     let min = 0, max = 0, sumAbs = 0;
     let zeroCrossings = 0;
     let prevSample = 0;
+    let zeroCount = 0;
+    let nonZeroSamplesCount = 0;
     
     for (let i = 0; i < audioData.length; i += 2) {
       // Convert two bytes to a 16-bit sample (little-endian)
       const sample = audioData.readInt16LE(i);
+      
+      // Track zero vs non-zero
+      if (sample === 0) {
+        zeroCount++;
+      } else {
+        nonZeroSamplesCount++;
+      }
       
       // Update stats
       min = Math.min(min, sample);
@@ -130,6 +240,8 @@ export class DeepgramService extends EventEmitter {
     
     // Check for potential silence (very low amplitude)
     const isSilence = avgDbFS < -45; // -45 dBFS is very quiet
+    const isAllZeros = zeroCount === samples;
+    const zeroPercentage = (zeroCount / samples) * 100;
     
     return {
       valid: true,
@@ -141,11 +253,15 @@ export class DeepgramService extends EventEmitter {
       avgDbFS: avgDbFS.toFixed(2) + " dBFS",
       zeroCrossings,
       zeroCrossingRate: (zeroCrossings / (durationMs / 1000)).toFixed(2) + " Hz",
+      zeroSamples: zeroCount,
+      zeroPercentage: zeroPercentage.toFixed(1) + "%",
       isSilence,
+      isAllZeros,
       possibleIssues: [
         isSilence ? "Audio appears to be silent or very quiet" : null,
         min > -100 && max < 100 ? "Extremely low amplitude - likely silence" : null,
-        min === 0 && max === 0 ? "All zero values - invalid audio" : null
+        zeroPercentage > 50 ? `High percentage of zero samples (${zeroPercentage.toFixed(1)}%)` : null,
+        isAllZeros ? "All samples are zero - invalid audio" : null
       ].filter(Boolean)
     };
   }
@@ -166,8 +282,8 @@ export class DeepgramService extends EventEmitter {
       // Debug info for audio format
       logger.info(`Transcribing audio with Deepgram: ${audioData.length} bytes`);
       
-      // Save audio sample for debugging
-      this.saveAudioForDebug(audioData);
+      // Save audio sample for debugging - force write to ensure we capture this sample
+      this.bufferAudioForDebug(audioData, true);
       
       // Analyze audio for issues
       const analysis = this.analyzeAudio(audioData);
@@ -175,6 +291,11 @@ export class DeepgramService extends EventEmitter {
       
       if (analysis.isSilence) {
         logger.warn(`Audio appears to be silent: ${analysis.avgDbFS}`);
+      }
+      
+      if (analysis.isAllZeros) {
+        logger.error(`Audio contains all zeros - completely invalid`);
+        return 'I couldn\'t hear anything. Please check your microphone.';
       }
       
       // Optimize for PCM audio (linear16)
@@ -247,6 +368,10 @@ export class DeepgramService extends EventEmitter {
 
     const mergedOptions = { ...defaultOptions, ...options };
     
+    // Store sample rate and channels for buffer calculations
+    this.sampleRate = mergedOptions.sampleRate || 16000;
+    this.channels = mergedOptions.channels || 1;
+    
     // Build query parameters
     const params = new URLSearchParams({
       language: mergedOptions.language || 'en-US',
@@ -311,6 +436,12 @@ export class DeepgramService extends EventEmitter {
 
     socket.on('close', (code, reason) => {
       logger.info(`Deepgram WebSocket closed: ${code} - ${reason}`);
+      
+      // Write any remaining buffered audio to disk
+      if (this.audioBuffer && this.bufferSize > 0) {
+        this.bufferAudioForDebug(Buffer.alloc(0), true);
+      }
+      
       this.emit('streamClose', { code, reason });
     });
 
@@ -327,6 +458,9 @@ export class DeepgramService extends EventEmitter {
       logger.warn('Attempted to send audio to closed Deepgram stream');
       return;
     }
+    
+    // Buffer audio for debugging
+    this.bufferAudioForDebug(audioData);
 
     try {
       stream.send(audioData);
@@ -343,6 +477,12 @@ export class DeepgramService extends EventEmitter {
   public closeStream(stream: WebSocket): void {
     if (stream.readyState === WebSocket.OPEN || stream.readyState === WebSocket.CONNECTING) {
       logger.info('Closing Deepgram stream');
+      
+      // Write any remaining buffered audio to disk
+      if (this.audioBuffer && this.bufferSize > 0) {
+        this.bufferAudioForDebug(Buffer.alloc(0), true);
+      }
+      
       stream.close();
     }
   }
