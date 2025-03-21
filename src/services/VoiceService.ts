@@ -87,11 +87,11 @@ export class VoiceService extends EventEmitter {
   public handleNewConnection(connectionId: string, ws: any): void {
     logger.info(`🔌 New WebSocket connection received: ${connectionId}`);
     
-    // Create a new connection object
+    // Create a new connection object with initial state set to 'connected'
     const connection: RTCConnection = {
       ws,
-      state: 'new',
-      isListening: false,
+      state: 'connected', // Immediately set state to connected to avoid state transition issues
+      isListening: true,  // Auto-start listening
       lastActivity: Date.now(),
       audioBuffer: [],
       totalAudioReceived: 0,
@@ -101,20 +101,51 @@ export class VoiceService extends EventEmitter {
 
     // Store the connection
     this.connections.set(connectionId, connection);
-    logger.debug(`Connection object created and stored for ${connectionId}`);
+    logger.debug(`Connection object created and stored for ${connectionId} (auto-configured as connected and listening)`);
 
     // Set up WebSocket message handler
     ws.on('message', (message: any) => {
       connection.messagesReceived++;
       
-      // Check if message is a string (signaling) or binary (audio data)
-      if (typeof message === 'string' || message instanceof String) {
+      // Debug the raw message
+      if (message instanceof Buffer) {
+        logger.debug(`Raw binary message from ${connectionId}: first 10 bytes: ${message.slice(0, 10).toString('hex')}, length: ${message.length}`);
+      }
+      
+      // First try to detect if the binary data is actually JSON
+      if (message instanceof Buffer) {
+        try {
+          // Check for JSON structure in the binary data
+          const textMessage = message.toString('utf8');
+          
+          // Log the first part of the message for debugging
+          logger.debug(`Trying to parse as JSON: ${textMessage.substring(0, 50)}...`);
+          
+          // Check if it looks like JSON (starts with { and has a "type" field)
+          if (textMessage.startsWith('{') && textMessage.includes('"type"')) {
+            // Try parsing as JSON
+            const parsedMessage = JSON.parse(textMessage);
+            logger.info(`📥 Successfully parsed binary data as JSON. Type: ${parsedMessage.type} from connection ${connectionId}`);
+            
+            // Handle the message
+            this.handleWebSocketMessage(connectionId, textMessage);
+            return;
+          }
+        } catch (e) {
+          // Not valid JSON, continue to audio processing
+          logger.debug(`Failed to parse binary as JSON: ${e.message}`);
+        }
+        
+        // Handle as binary audio data
+        logger.debug(`Handling as binary data #${connection.messagesReceived} from connection ${connectionId}, size: ${message.length} bytes`);
+        this.handleAudioData(connectionId, message);
+      } else if (typeof message === 'string' || message instanceof String) {
+        // Handle string message
         logger.debug(`Received text message #${connection.messagesReceived} from connection ${connectionId}`);
         this.handleWebSocketMessage(connectionId, message.toString());
       } else {
-        // Handle binary audio data
-        logger.debug(`Received binary data #${connection.messagesReceived} from connection ${connectionId}, size: ${message.length} bytes`);
-        this.handleAudioData(connectionId, message);
+        // Unknown message type
+        logger.warn(`Received unknown message type from ${connectionId}: ${typeof message}`);
       }
     });
 
@@ -130,7 +161,10 @@ export class VoiceService extends EventEmitter {
       this.sendError(connectionId, 'CONNECTION_FAILED', 'WebSocket connection error');
     });
 
-    logger.info(`🟢 Voice connection fully established: ${connectionId}`);
+    logger.info(`🟢 Voice connection fully established and auto-configured: ${connectionId}`);
+    
+    // Send a message to confirm the connection is ready
+    this.sendMessage(connectionId, { type: 'connection-ready' });
     
     // Log connection stats periodically
     const statsInterval = setInterval(() => {
@@ -147,7 +181,7 @@ export class VoiceService extends EventEmitter {
   }
   
   /**
-   * Handle incoming audio data from WebRTC
+   * Handle audio data, with special detection for start-listening command
    */
   private handleAudioData(connectionId: string, audioChunk: Buffer): void {
     const connection = this.connections.get(connectionId);
@@ -156,18 +190,53 @@ export class VoiceService extends EventEmitter {
       return;
     }
     
+    // Special check: Try to detect "start-listening" command in binary data
+    // This handles cases where the client combines control messages with audio data
+    try {
+      // Check first few bytes for potential text
+      const prefix = audioChunk.slice(0, Math.min(150, audioChunk.length)).toString('utf8');
+      if (prefix.includes('"type":"start-listening"')) {
+        logger.info(`🔍 Detected start-listening command embedded in binary data from ${connectionId}`);
+        // Force start listening
+        if (!connection.isListening) {
+          if (connection.state !== 'connected') {
+            connection.state = 'connected';
+          }
+          this.startListening(connectionId);
+        }
+      }
+    } catch (e) {
+      // Not a text prefix, continue normal processing
+    }
+    
     // Update last activity time regardless of listening state
     connection.lastActivity = Date.now();
     
-    // If connection exists but isn't listening, log a more specific message
+    // Handle small packets differently - they might be heartbeats
+    const isSmallPacket = audioChunk.length < 50;
+    
+    // If connection exists but isn't listening, auto-start listening
     if (!connection.isListening) {
-      logger.debug(`Ignoring audio chunk from connection ${connectionId}: connection exists but not in listening state (state=${connection.state})`);
-      
-      // If connection is established but not listening, auto-start listening
-      if (connection.state === 'connected') {
-        logger.info(`Auto-starting listening for connection ${connectionId} that is sending audio`);
+      if (isSmallPacket) {
+        logger.debug(`Received small packet (${audioChunk.length} bytes) from ${connectionId}, might be a heartbeat`);
+      } else {
+        logger.info(`Received substantial audio data (${audioChunk.length} bytes) from non-listening connection ${connectionId}. Auto-starting listening.`);
+        // Auto-repair connection state if needed
+        if (connection.state !== 'connected') {
+          logger.warn(`Auto-repairing connection state for ${connectionId} from ${connection.state} to 'connected'`);
+          connection.state = 'connected';
+        }
+        // Force start listening since we're getting actual audio
         this.startListening(connectionId);
       }
+      
+      // Skip processing for now - the next audio chunk will be processed
+      return;
+    }
+    
+    // Don't process very small packets as audio
+    if (isSmallPacket) {
+      logger.debug(`Skipping small packet (${audioChunk.length} bytes) from ${connectionId} - likely a heartbeat`);
       return;
     }
     
@@ -208,6 +277,9 @@ export class VoiceService extends EventEmitter {
       const data = JSON.parse(message);
       logger.info(`📥 Received ${data.type} message from connection ${connectionId}`);
       
+      // Log raw message content for debugging
+      logger.debug(`Message content: ${JSON.stringify(data).substring(0, 200)}${JSON.stringify(data).length > 200 ? '...' : ''}`);
+      
       switch (data.type) {
         case 'offer':
           logger.info(`Processing offer from ${connectionId} (connection state: ${connection.state})`);
@@ -220,7 +292,7 @@ export class VoiceService extends EventEmitter {
           break;
           
         case 'start-listening':
-          logger.info(`Processing start-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
+          logger.info(`⭐⭐⭐ RECEIVED START-LISTENING from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
           this.startListening(connectionId);
           break;
           
@@ -333,11 +405,23 @@ export class VoiceService extends EventEmitter {
       return;
     }
 
+    logger.info(`Processing start-listening request for connection ${connectionId} (current state: ${connection.state}, currently listening: ${connection.isListening})`);
+
+    // Auto-repair connection state if needed
+    if (connection.state === 'new') {
+      logger.warn(`Connection ${connectionId} is still in 'new' state when start-listening requested. Auto-repairing connection state.`);
+      connection.state = 'connected';
+    }
+
     // Reset audio buffer
     connection.audioBuffer = [];
     connection.isListening = true;
+    
     logger.info(`🎙️ Started listening to connection ${connectionId}`);
     this.sendMessage(connectionId, { type: 'listening-started' });
+    
+    // Log connection state after updating
+    logger.info(`Connection ${connectionId} now listening (state=${connection.state}, isListening=${connection.isListening})`);
   }
 
   /**
