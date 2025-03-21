@@ -274,9 +274,8 @@ export class DeepgramService extends EventEmitter {
   public async transcribeAudio(audioData: Buffer): Promise<string> {
     try {
       if (!this.apiKey) {
-        logger.warn('Deepgram API key not configured, using mock transcription');
-        // For testing without an API key, return a mock response
-        return 'This is a simulated transcription for testing without an API key.';
+        logger.error('Deepgram API key not configured');
+        throw new Error('Deepgram API key not configured');
       }
       
       // Debug info for audio format
@@ -343,8 +342,8 @@ export class DeepgramService extends EventEmitter {
         logger.error('Deepgram error response:', error.response.data);
       }
       
-      // For robustness in production, return a fallback rather than throwing
-      return 'Sorry, I had trouble understanding that. Could you try again?';
+      // Throw the error instead of returning a fallback response
+      throw new Error(`Transcription failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

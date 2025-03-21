@@ -22,23 +22,22 @@ export class GeminiService {
   }
 
   /**
-   * Process user input through Gemini LLM
+   * Generate a response to the user's input using Gemini LLM
    * @param userInput The user's transcribed speech
    * @returns LLM-generated response
    */
-  public async processText(userInput: string): Promise<string> {
+  public async generateResponse(userInput: string): Promise<string> {
     try {
       if (!this.apiKey) {
         throw new Error('Gemini API key not configured');
       }
 
-      logger.info(`Processing text with Gemini: "${userInput.substring(0, 100)}${userInput.length > 100 ? '...' : ''}"`);
+      logger.info(`Generating response with Gemini: "${userInput.substring(0, 100)}${userInput.length > 100 ? '...' : ''}"`);
       
-      // For the echo server, we'll add a simple response wrapper
-      // In a more complex implementation, you'd have proper prompting
+      // Create a conversation-style prompt
       const prompt = `User said: "${userInput}"
       
-      For this echo service, respond briefly to what the user said. Keep your response under 30 words.`;
+      Respond conversationally to what the user said. Keep your response concise and natural-sounding for speech.`;
       
       const result = await this.model.generateContent(prompt);
       const response = result.response.text();
@@ -47,7 +46,7 @@ export class GeminiService {
       
       return response;
     } catch (error) {
-      logger.error('Error processing text with Gemini:', error);
+      logger.error('Error generating response with Gemini:', error);
       throw new Error(`LLM processing failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
