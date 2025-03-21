@@ -613,7 +613,7 @@ export class VoiceService extends EventEmitter {
   }
   
   /**
-   * Process audio data through STT -> TTS pipeline (skipping LLM for echo server)
+   * Process audio data through STT -> TTS pipeline using streaming capabilities
    */
   private async processAudio(connectionId: string, audioData: Buffer): Promise<void> {
     const connection = this.connections.get(connectionId);
@@ -622,124 +622,57 @@ export class VoiceService extends EventEmitter {
       return;
     }
     
+    const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+    const startTime = new Date();
+    
     try {
-      logger.info(`🔄 Starting audio echo processing pipeline for connection ${connectionId}`);
+      logger.info(`[${requestId}] [${startTime.toISOString()}] 🔄 Starting streaming audio processing pipeline for connection ${connectionId}`);
       
       // Ensure we have audio data to process
       if (!audioData || audioData.length === 0) {
-        logger.warn(`Empty audio data for connection ${connectionId}`);
+        logger.warn(`[${requestId}] Empty audio data for connection ${connectionId}`);
         this.sendError(connectionId, 'MEDIA_ERROR', 'No audio data to process');
         return;
       }
       
       // Log audio format information
-      logger.info(`📊 PROCESSING AUDIO: ${audioData.length} bytes, first few bytes: ${audioData.slice(0, 16).toString('hex')}`);
+      logger.info(`[${requestId}] 📊 PROCESSING AUDIO: ${audioData.length} bytes, first few bytes: ${audioData.slice(0, 16).toString('hex')}`);
 
       // Force using a test audio for debugging if real audio is not being received
       if (audioData.length < 1000) {
-        logger.warn(`Audio data may be too small (${audioData.length} bytes). Using test phrase.`);
+        logger.warn(`[${requestId}] Audio data may be too small (${audioData.length} bytes). Using test phrase.`);
         
         // Create a test response
         const testResponse = "This is a test response. I'm echoing back what I heard.";
         
-        // Send the test response to TTS
-        logger.info(`Using test response for connection ${connectionId}: "${testResponse}"`);
+        // Use streaming TTS for the test response
+        logger.info(`[${requestId}] Using test response for connection ${connectionId}: "${testResponse}"`);
         this.sendMessage(connectionId, { type: 'speaking-start' });
         
-        const startTts = Date.now();
-        const audioResponse = await this.cartesiaService.textToSpeech(testResponse);
-        const ttsDuration = Date.now() - startTts;
-        
-        logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
-        
-        // Send audio to client
-        await this.sendAudioToClient(connectionId, audioResponse);
+        // Use streaming TTS from Cartesia
+        await this.streamCartesiaResponse(connectionId, requestId, testResponse);
         return;
       }
       
-      // Step 1: Speech-to-text with Deepgram
-      logger.info(`🎤→📝 Calling Deepgram STT service for connection ${connectionId}`);
-      const startStt = Date.now();
+      // Determine if we should use batch or streaming for this audio
+      // For short audio clips (< 5 seconds), it's more efficient to use batch processing
+      const isShortAudio = audioData.length < 100000; // Rough estimate for 5 seconds of audio
       
-      try {
-        const transcribedText = await this.deepgramService.transcribeAudio(audioData);
-        const sttDuration = Date.now() - startStt;
-        
-        logger.info(`✅ STT result: "${transcribedText || 'EMPTY'}" for connection ${connectionId}`);
-        
-        if (!transcribedText || transcribedText.trim() === '') {
-          logger.warn(`Empty transcription result for connection ${connectionId}`);
-          
-          // Use a default response when transcription fails
-          const defaultResponse = "I couldn't hear that clearly. Could you please speak again?";
-          
-          // Send the default response to TTS
-          logger.info(`Using default response for connection ${connectionId}: "${defaultResponse}"`);
-          this.sendMessage(connectionId, { type: 'speaking-start' });
-          
-          const startTts = Date.now();
-          const audioResponse = await this.cartesiaService.textToSpeech(defaultResponse);
-          const ttsDuration = Date.now() - startTts;
-          
-          logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
-          
-          // Send audio to client
-          await this.sendAudioToClient(connectionId, audioResponse);
-          return;
-        }
-        
-        logger.info(`✅ STT completed in ${sttDuration}ms for connection ${connectionId}, transcribed: "${transcribedText.substring(0, 100)}${transcribedText.length > 100 ? '...' : ''}"`);
-        
-        // Create echo response (skip LLM processing)
-        logger.info(`📝→🔊 Creating echo response for connection ${connectionId}`);
-        const echoResponse = `You said: ${transcribedText}`;
-        
-        // Step 2: Text-to-speech with Cartesia
-        logger.info(`💭→🔊 Starting TTS process for connection ${connectionId}`);
-        this.sendMessage(connectionId, { type: 'speaking-start' });
-        
-        const startTts = Date.now();
-        
-        try {
-          const audioResponse = await this.cartesiaService.textToSpeech(echoResponse);
-          const ttsDuration = Date.now() - startTts;
-          
-          if (!audioResponse || audioResponse.length === 0) {
-            logger.warn(`Empty TTS response for connection ${connectionId}`);
-            this.sendError(connectionId, 'MEDIA_ERROR', 'Failed to generate speech from text');
-            return;
-          }
-          
-          logger.info(`✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes, first few bytes: ${audioResponse.slice(0, 16).toString('hex')}`);
-          
-          // Step 3: Send audio back to client
-          logger.info(`🔊→📱 Sending ${audioResponse.length} bytes of audio back to connection ${connectionId}`);
-          
-          // Send the audio to the client
-          await this.sendAudioToClient(connectionId, audioResponse);
-          
-          const totalProcessingTime = sttDuration + ttsDuration;
-          logger.info(`📊 Total echo processing time: ${totalProcessingTime}ms for connection ${connectionId}`);
-        } catch (ttsError) {
-          logger.error(`TTS service error for ${connectionId}:`, ttsError);
-          this.sendError(connectionId, 'TTS_ERROR', 'Text-to-speech service failed');
-        }
-      } catch (sttError) {
-        logger.error(`STT service error for ${connectionId}:`, sttError);
-        this.sendError(connectionId, 'STT_ERROR', 'Speech-to-text service failed');
-        
-        // Try to return a fallback audio response
-        const fallbackResponse = "I'm having trouble understanding you right now. Could you try again?";
-        try {
-          this.sendMessage(connectionId, { type: 'speaking-start' });
-          const audioResponse = await this.cartesiaService.textToSpeech(fallbackResponse);
-          await this.sendAudioToClient(connectionId, audioResponse);
-        } catch (fallbackError) {
-          logger.error(`Failed to send fallback audio for ${connectionId}:`, fallbackError);
-        }
+      if (isShortAudio) {
+        // Use batch processing for shorter audio
+        await this.processBatchAudio(connectionId, requestId, audioData);
+      } else {
+        // Use streaming for longer audio
+        await this.processStreamingAudio(connectionId, requestId, audioData);
       }
+      
+      const endTime = new Date();
+      const duration = endTime.getTime() - startTime.getTime();
+      logger.info(`[${requestId}] [${endTime.toISOString()}] ✅ Total audio processing completed in ${duration}ms for connection ${connectionId}`);
+      
     } catch (error) {
-      logger.error(`🔴 Error in audio echo pipeline for connection ${connectionId}:`, error);
+      const errorTime = new Date();
+      logger.error(`[${requestId}] [${errorTime.toISOString()}] 🔴 Error in audio processing pipeline for connection ${connectionId}:`, error);
       this.sendError(
         connectionId, 
         'INTERNAL_ERROR', 
@@ -753,9 +686,312 @@ export class VoiceService extends EventEmitter {
         const audioResponse = await this.cartesiaService.textToSpeech(errorResponse);
         await this.sendAudioToClient(connectionId, audioResponse);
       } catch (feedbackError) {
-        logger.error(`Failed to send error audio feedback for ${connectionId}`, feedbackError);
+        logger.error(`[${requestId}] [${new Date().toISOString()}] Failed to send error audio feedback for ${connectionId}`, feedbackError);
       }
     }
+  }
+  
+  /**
+   * Process audio using batch (non-streaming) method for shorter audio clips
+   */
+  private async processBatchAudio(connectionId: string, requestId: string, audioData: Buffer): Promise<void> {
+    logger.info(`[${requestId}] Using batch processing for audio from connection ${connectionId}`);
+    
+    // Step 1: Speech-to-text with Deepgram
+    logger.info(`[${requestId}] 🎤→📝 Calling Deepgram STT service (batch mode) for connection ${connectionId}`);
+    const startStt = Date.now();
+    
+    try {
+      const transcribedText = await this.deepgramService.transcribeAudio(audioData);
+      const sttDuration = Date.now() - startStt;
+      
+      logger.info(`[${requestId}] ✅ STT result: "${transcribedText || 'EMPTY'}" for connection ${connectionId}`);
+      
+      if (!transcribedText || transcribedText.trim() === '') {
+        logger.warn(`[${requestId}] Empty transcription result for connection ${connectionId}`);
+        
+        // Use a default response when transcription fails
+        const defaultResponse = "I couldn't hear that clearly. Could you please speak again?";
+        
+        // Send the default response to TTS
+        logger.info(`[${requestId}] Using default response for connection ${connectionId}: "${defaultResponse}"`);
+        this.sendMessage(connectionId, { type: 'speaking-start' });
+        
+        const startTts = Date.now();
+        const audioResponse = await this.cartesiaService.textToSpeech(defaultResponse);
+        const ttsDuration = Date.now() - startTts;
+        
+        logger.info(`[${requestId}] ✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
+        
+        // Send audio to client
+        await this.sendAudioToClient(connectionId, audioResponse);
+        return;
+      }
+      
+      logger.info(`[${requestId}] ✅ STT completed in ${sttDuration}ms for connection ${connectionId}, transcribed: "${transcribedText.substring(0, 100)}${transcribedText.length > 100 ? '...' : ''}"`);
+      
+      // Create echo response (skip LLM processing)
+      logger.info(`[${requestId}] 📝→🔊 Creating echo response for connection ${connectionId}`);
+      const echoResponse = `You said: ${transcribedText}`;
+      
+      // Step 2: Text-to-speech with Cartesia
+      logger.info(`[${requestId}] 💭→🔊 Starting TTS process for connection ${connectionId}`);
+      this.sendMessage(connectionId, { type: 'speaking-start' });
+      
+      const startTts = Date.now();
+      
+      try {
+        const audioResponse = await this.cartesiaService.textToSpeech(echoResponse);
+        const ttsDuration = Date.now() - startTts;
+        
+        if (!audioResponse || audioResponse.length === 0) {
+          logger.warn(`[${requestId}] Empty TTS response for connection ${connectionId}`);
+          this.sendError(connectionId, 'MEDIA_ERROR', 'Failed to generate speech from text');
+          return;
+        }
+        
+        logger.info(`[${requestId}] ✅ TTS completed in ${ttsDuration}ms for connection ${connectionId}, generated ${audioResponse.length} bytes`);
+        
+        // Step 3: Send audio back to client
+        logger.info(`[${requestId}] 🔊→📱 Sending ${audioResponse.length} bytes of audio back to connection ${connectionId}`);
+        
+        // Send the audio to the client
+        await this.sendAudioToClient(connectionId, audioResponse);
+        
+        const totalProcessingTime = sttDuration + ttsDuration;
+        logger.info(`[${requestId}] 📊 Total batch processing time: ${totalProcessingTime}ms for connection ${connectionId}`);
+      } catch (ttsError) {
+        logger.error(`[${requestId}] TTS service error for ${connectionId}:`, ttsError);
+        this.sendError(connectionId, 'TTS_ERROR', 'Text-to-speech service failed');
+      }
+    } catch (sttError) {
+      logger.error(`[${requestId}] STT service error for ${connectionId}:`, sttError);
+      this.sendError(connectionId, 'STT_ERROR', 'Speech-to-text service failed');
+      
+      // Try to return a fallback audio response
+      const fallbackResponse = "I'm having trouble understanding you right now. Could you try again?";
+      try {
+        this.sendMessage(connectionId, { type: 'speaking-start' });
+        const audioResponse = await this.cartesiaService.textToSpeech(fallbackResponse);
+        await this.sendAudioToClient(connectionId, audioResponse);
+      } catch (fallbackError) {
+        logger.error(`[${requestId}] Failed to send fallback audio for ${connectionId}:`, fallbackError);
+      }
+    }
+  }
+  
+  /**
+   * Process audio using streaming method for longer audio clips
+   */
+  private async processStreamingAudio(connectionId: string, requestId: string, audioData: Buffer): Promise<void> {
+    logger.info(`[${requestId}] Using streaming processing for audio from connection ${connectionId}`);
+    
+    // Create a promise that will resolve when we have the full transcript
+    const transcriptionPromise = new Promise<string>((resolve, reject) => {
+      let fullTranscript = '';
+      let lastInterimResult = '';
+      
+      // Set a timeout to prevent hanging indefinitely
+      const timeout = setTimeout(() => {
+        // If we have any interim results, use them
+        if (lastInterimResult) {
+          resolve(lastInterimResult);
+        } else {
+          reject(new Error('Transcription timeout'));
+        }
+      }, 30000); // 30 second timeout
+      
+      // Create Deepgram stream with PCM audio settings matching client
+      const deepgramStream = this.deepgramService.createStream({
+        encoding: 'linear16',
+        sampleRate: 16000, // 16kHz to match client settings
+        channels: 1,       // Mono audio
+        model: 'nova-2',
+        language: 'en-US',
+        smartFormat: true,
+        interimResults: true
+      });
+      
+      // Handle events from Deepgram
+      this.deepgramService.on('transcription', (data) => {
+        const { transcript, isFinal } = data;
+        
+        if (transcript) {
+          // Store the last interim result in case we timeout
+          lastInterimResult = transcript;
+          
+          if (isFinal) {
+            // For final results, append to full transcript
+            fullTranscript += (fullTranscript ? ' ' : '') + transcript;
+            logger.info(`[${requestId}] Received final transcript part: "${transcript}"`);
+            
+            // Optionally, we could start TTS for this segment immediately
+            // but for simplicity, we'll wait for the full transcript
+          }
+        }
+      });
+      
+      this.deepgramService.on('streamClose', () => {
+        clearTimeout(timeout);
+        logger.info(`[${requestId}] Deepgram stream closed, final transcript: "${fullTranscript}"`);
+        
+        if (fullTranscript) {
+          resolve(fullTranscript);
+        } else if (lastInterimResult) {
+          // If we have no final results but do have interim results, use those
+          resolve(lastInterimResult);
+        } else {
+          reject(new Error('No transcription received'));
+        }
+      });
+      
+      this.deepgramService.on('streamError', (error) => {
+        clearTimeout(timeout);
+        logger.error(`[${requestId}] Deepgram stream error:`, error);
+        reject(error);
+      });
+      
+      // Send the audio to Deepgram
+      this.deepgramService.sendAudioToStream(deepgramStream, audioData);
+      
+      // Close the stream after sending all audio
+      // For real-time continuous streaming, you would keep this open
+      this.deepgramService.closeStream(deepgramStream);
+    });
+    
+    try {
+      // Wait for the transcription to complete
+      const transcribedText = await transcriptionPromise;
+      
+      if (!transcribedText || transcribedText.trim() === '') {
+        logger.warn(`[${requestId}] Empty streaming transcription result for connection ${connectionId}`);
+        
+        // Use a default response when transcription fails
+        const defaultResponse = "I couldn't hear that clearly. Could you please speak again?";
+        
+        // Stream the default response
+        logger.info(`[${requestId}] Using default response for connection ${connectionId}: "${defaultResponse}"`);
+        this.sendMessage(connectionId, { type: 'speaking-start' });
+        
+        // Use streaming TTS
+        await this.streamCartesiaResponse(connectionId, requestId, defaultResponse);
+        return;
+      }
+      
+      logger.info(`[${requestId}] ✅ Streaming STT completed for connection ${connectionId}, transcribed: "${transcribedText.substring(0, 100)}${transcribedText.length > 100 ? '...' : ''}"`);
+      
+      // Create echo response (skip LLM processing)
+      logger.info(`[${requestId}] 📝→🔊 Creating echo response for connection ${connectionId}`);
+      const echoResponse = `You said: ${transcribedText}`;
+      
+      // Stream the response back using Cartesia
+      logger.info(`[${requestId}] 💭→🔊 Starting streaming TTS process for connection ${connectionId}`);
+      this.sendMessage(connectionId, { type: 'speaking-start' });
+      
+      // Use streaming TTS
+      await this.streamCartesiaResponse(connectionId, requestId, echoResponse);
+      
+    } catch (error) {
+      logger.error(`[${requestId}] Error in streaming audio processing for ${connectionId}:`, error);
+      this.sendError(connectionId, 'STREAMING_ERROR', `Streaming failed: ${error instanceof Error ? error.message : String(error)}`);
+      
+      // Try to return a fallback audio response
+      const fallbackResponse = "I'm having trouble processing your audio. Could you try again?";
+      try {
+        this.sendMessage(connectionId, { type: 'speaking-start' });
+        const audioResponse = await this.cartesiaService.textToSpeech(fallbackResponse);
+        await this.sendAudioToClient(connectionId, audioResponse);
+      } catch (fallbackError) {
+        logger.error(`[${requestId}] Failed to send fallback audio for ${connectionId}:`, fallbackError);
+      }
+    }
+  }
+  
+  /**
+   * Stream a text response using Cartesia's streaming TTS
+   */
+  private async streamCartesiaResponse(connectionId: string, requestId: string, text: string): Promise<void> {
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      logger.warn(`[${requestId}] Cannot stream audio to disconnected client: ${connectionId}`);
+      return;
+    }
+    
+    return new Promise<void>((resolve, reject) => {
+      try {
+        logger.info(`[${requestId}] Starting Cartesia streaming TTS for: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
+        
+        // Set up event handlers for the Cartesia streaming service
+        const audioChunks: Buffer[] = [];
+        
+        // Handle stream start
+        this.cartesiaService.once('streamStart', () => {
+          logger.info(`[${requestId}] Cartesia streaming TTS started for ${connectionId}`);
+        });
+        
+        // Handle audio chunks
+        this.cartesiaService.on('audioChunk', async (data) => {
+          const { audio, chunkIndex } = data;
+          
+          // Store the chunk for potential later use
+          audioChunks.push(audio);
+          
+          logger.debug(`[${requestId}] Received audio chunk #${chunkIndex} (${audio.length} bytes) from Cartesia for ${connectionId}`);
+          
+          // Send the audio chunk to the client
+          // For simplicity, we'll buffer the chunks and send them at the end
+          // In a real-time scenario, you would stream each chunk as it arrives
+        });
+        
+        // Handle stream end
+        this.cartesiaService.once('streamEnd', async (data) => {
+          const { chunkCount, totalBytes } = data;
+          logger.info(`[${requestId}] Cartesia streaming TTS completed: ${chunkCount} chunks, ${totalBytes} bytes for ${connectionId}`);
+          
+          // Combine all chunks into a single audio buffer
+          const combinedAudio = Buffer.concat(audioChunks);
+          
+          // Send the combined audio to the client
+          try {
+            await this.sendAudioToClient(connectionId, combinedAudio);
+            
+            // Clean up event listeners
+            this.cartesiaService.removeAllListeners('audioChunk');
+            
+            resolve();
+          } catch (sendError) {
+            logger.error(`[${requestId}] Error sending streaming audio to client ${connectionId}:`, sendError);
+            reject(sendError);
+          }
+        });
+        
+        // Handle stream errors
+        this.cartesiaService.once('streamError', (error) => {
+          logger.error(`[${requestId}] Cartesia streaming TTS error for ${connectionId}:`, error);
+          
+          // Clean up event listeners
+          this.cartesiaService.removeAllListeners('audioChunk');
+          
+          reject(error);
+        });
+        
+        // Start the streaming TTS with PCM format matching client expectations
+        this.cartesiaService.streamTextToSpeech(text, {
+          outputFormat: {
+            container: 'raw',
+            sampleRate: 16000,  // Match client-side expectation: 16kHz
+            encoding: 'pcm_s16le' // 16-bit PCM, little-endian (Linear16)
+          }
+        }).catch(error => {
+          logger.error(`[${requestId}] Error starting Cartesia streaming for ${connectionId}:`, error);
+          reject(error);
+        });
+        
+      } catch (error) {
+        logger.error(`[${requestId}] Error setting up Cartesia streaming for ${connectionId}:`, error);
+        reject(error);
+      }
+    });
   }
 
   /**
