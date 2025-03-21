@@ -245,22 +245,16 @@ export class VoiceService extends EventEmitter {
     session.audioBuffer.push(audioChunk);
     
     // Track audio reception for debugging
-    if (session.totalAudioReceived % 8000 === 0) {
+    if (session.totalAudioReceived % 2000 === 0) { // Lower milestone threshold
       logger.info(`Audio reception milestone: ${session.totalAudioReceived} total bytes from ${connectionId}`);
     }
     
     // Debug logging for audio data reception
-    console.log('[DEBUG] Server received audio data:', {
-      connectionId: connectionId,
-      bytesReceived: audioChunk.length,
-      totalReceived: session.totalAudioReceived,
-      bufferChunks: session.audioBuffer.length,
-      timestamp: Date.now()
-    });
+    logger.debug(`Server received audio data: connectionId=${connectionId}, bytes=${audioChunk.length}, total=${session.totalAudioReceived}, chunks=${session.audioBuffer.length}`);
     
-    // Process audio when we've collected enough data (8KB)
+    // Process audio when we've collected enough data (4KB - lowered from 8KB)
     const totalSize = session.audioBuffer.reduce((sum, buffer) => sum + buffer.length, 0);
-    if (totalSize > 8000) {
+    if (totalSize > 4000) {
       logger.info(`Collected ${totalSize} bytes of audio (${session.audioBuffer.length} chunks), processing for ${connectionId}`);
       this.processAudio(connectionId);
     }

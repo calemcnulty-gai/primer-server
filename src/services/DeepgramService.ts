@@ -272,78 +272,84 @@ export class DeepgramService extends EventEmitter {
    * @returns Transcribed text
    */
   public async transcribeAudio(audioData: Buffer): Promise<string> {
-    try {
-      if (!this.apiKey) {
-        logger.error('Deepgram API key not configured');
-        throw new Error('Deepgram API key not configured');
-      }
-      
-      // Debug info for audio format
-      logger.info(`Transcribing audio with Deepgram: ${audioData.length} bytes`);
-      
-      // Save audio sample for debugging - force write to ensure we capture this sample
-      this.bufferAudioForDebug(audioData, true);
-      
-      // Analyze audio for issues
-      const analysis = this.analyzeAudio(audioData);
-      logger.info(`Audio analysis: ${JSON.stringify(analysis, null, 2)}`);
-      
-      if (analysis.isSilence) {
-        logger.warn(`Audio appears to be silent: ${analysis.avgDbFS}`);
-      }
-      
-      if (analysis.isAllZeros) {
-        logger.error(`Audio contains all zeros - completely invalid`);
-        return 'I couldn\'t hear anything. Please check your microphone.';
-      }
-      
-      // Optimize for PCM audio (linear16)
-      // Consistently use 16kHz, mono, 16-bit PCM to match client settings
-      const encoding = '&encoding=linear16&sample_rate=16000&channels=1';
-      const contentType = 'audio/L16; rate=16000';
-      
-      // Send audio to Deepgram for transcription
-      const response = await axios.post(
-        `${this.apiUrl}?model=nova-2&smart_format=true&language=en-US${encoding}`,
-        audioData,
-        {
-          headers: {
-            'Authorization': `Token ${this.apiKey}`,
-            'Content-Type': contentType,
-          },
-          timeout: 10000, // 10 second timeout
-        }
-      );
+    if (!this.apiKey) {
+      throw new Error('DEEPGRAM_API_KEY not set in environment variables');
+    }
 
-      // Log the raw response for debugging
-      logger.info(`Deepgram response status: ${response.status}`);
-      logger.debug(`Deepgram full response: ${JSON.stringify(response.data)}`);
+    // Analyze audio before sending
+    const analysis = this.analyzeAudio(audioData);
+    logger.info(`Audio analysis: ${JSON.stringify(analysis)}`);
+
+    if (!analysis.valid) {
+      throw new Error(`Invalid audio data: ${analysis.reason}`);
+    }
+
+    if (analysis.isSilence) {
+      logger.warn('Audio appears to be silence');
+      return '';
+    }
+
+    // Save audio for debugging if enabled
+    const debugFilePath = this.bufferAudioForDebug(audioData, true);
+    if (debugFilePath) {
+      logger.info(`Saved audio to ${debugFilePath} for debugging`);
+    }
+
+    try {
+      // Convert PCM to WAV for Deepgram
+      const wavData = this.pcmToWav(audioData, this.sampleRate, this.channels);
+
+      // Send to Deepgram
+      logger.info(`Sending ${wavData.length} bytes to Deepgram (${analysis.durationMs.toFixed(1)}ms of audio)`);
       
-      // Get the transcript from the response
-      const transcript = response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
-      logger.info(`Transcription result: "${transcript.substring(0, 100)}${transcript.length > 100 ? '...' : ''}"`);
-      
-      // If no transcript was generated but the API call was successful
-      if (transcript === '') {
-        const confidence = response.data?.results?.channels?.[0]?.alternatives?.[0]?.confidence || 0;
-        logger.warn(`Deepgram returned empty transcript with confidence: ${confidence}`);
-        
-        if (analysis.isSilence) {
-          return 'I didn\'t hear anything. Please speak into your microphone.';
-        } else {
-          return 'I heard something but couldn\'t make out the words. Could you speak louder or more clearly?';
+      const response = await axios.post(this.apiUrl, wavData, {
+        headers: {
+          'Authorization': `Token ${this.apiKey}`,
+          'Content-Type': 'audio/wav',
+        },
+        params: {
+          model: 'general',
+          language: 'en-US',
+          smart_format: true,
+          diarize: false,
+          punctuate: true,
         }
+      });
+
+      if (!response.data || !response.data.results || !response.data.results.channels) {
+        logger.error('Unexpected response format from Deepgram:', response.data);
+        throw new Error('Invalid response from Deepgram');
       }
+
+      // Extract transcription from response
+      const transcription = response.data.results.channels[0]?.alternatives[0]?.transcript || '';
       
-      return transcript;
-    } catch (error) {
-      logger.error('Error transcribing audio:', error);
-      if (error.response?.data) {
-        logger.error('Deepgram error response:', error.response.data);
+      if (transcription.trim() === '') {
+        logger.warn('Deepgram returned empty transcription');
+      } else {
+        logger.info(`Transcription success: "${transcription}"`);
       }
-      
-      // Throw the error instead of returning a fallback response
-      throw new Error(`Transcription failed: ${error instanceof Error ? error.message : String(error)}`);
+
+      return transcription;
+
+    } catch (error: any) {
+      // Enhanced error logging
+      if (error.response) {
+        // The request was made and the server responded with a status code
+        // that falls out of the range of 2xx
+        logger.error('Deepgram API error:', {
+          status: error.response.status,
+          data: error.response.data,
+          headers: error.response.headers
+        });
+      } else if (error.request) {
+        // The request was made but no response was received
+        logger.error('No response from Deepgram:', error.message);
+      } else {
+        // Something happened in setting up the request that triggered an Error
+        logger.error('Error setting up Deepgram request:', error.message);
+      }
+      throw error;
     }
   }
 
