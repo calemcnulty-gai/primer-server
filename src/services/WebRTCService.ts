@@ -275,10 +275,10 @@ export class WebRTCService extends EventEmitter {
         connection.state = 'connected';
         connection.connected = true;
         
-        // Force update peer.connected to ensure consistency
+        // Track connection state inconsistency but don't try to modify read-only property
         if (!peer.connected) {
-          logger.warn(`Peer.connected was false for ${connectionId} despite connect event, forcing to true`);
-          peer.connected = true;
+          logger.warn(`Peer.connected is false for ${connectionId} despite connect event, tracking in our internal state only`);
+          // We can't modify peer.connected as it's read-only
         }
         
         // Notify that the connection is ready
