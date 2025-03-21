@@ -274,7 +274,8 @@ export class VoiceService extends EventEmitter {
         trickle: true,
         config: {
           iceServers: this.iceServers
-        }
+        },
+        wrtc: require('wrtc') // Explicitly provide the wrtc implementation
       });
       
       // Store the peer instance
