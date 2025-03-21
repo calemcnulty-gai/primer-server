@@ -15,11 +15,16 @@ const logger = createLogger('DeepgramService');
 export interface DeepgramStreamingOptions {
   language?: string;
   model?: string;
-  smartFormat?: boolean;
-  interimResults?: boolean;
+  smart_format?: boolean;
+  interim_results?: boolean;
   encoding?: string;
   sampleRate?: number;
   channels?: number;
+}
+
+export interface DeepgramConnection extends EventEmitter {
+  send(data: Buffer): void;
+  finish(): void;
 }
 
 export class DeepgramService extends EventEmitter {
@@ -364,8 +369,8 @@ export class DeepgramService extends EventEmitter {
     const defaultOptions: DeepgramStreamingOptions = {
       language: 'en-US',
       model: 'nova-2',
-      smartFormat: true,
-      interimResults: true,
+      smart_format: true,
+      interim_results: true,
       encoding: 'linear16',
       sampleRate: 16000,  // Match client-side: 16kHz
       channels: 1
@@ -381,8 +386,8 @@ export class DeepgramService extends EventEmitter {
     const params = new URLSearchParams({
       language: mergedOptions.language || 'en-US',
       model: mergedOptions.model || 'nova-2', 
-      smart_format: String(mergedOptions.smartFormat || true),
-      interim_results: String(mergedOptions.interimResults || true),
+      smart_format: String(mergedOptions.smart_format || true),
+      interim_results: String(mergedOptions.interim_results || true),
     });
 
     if (mergedOptions.encoding) {
@@ -490,5 +495,51 @@ export class DeepgramService extends EventEmitter {
       
       stream.close();
     }
+  }
+
+  /**
+   * Create a new live transcription connection
+   */
+  public createConnection(options: DeepgramStreamingOptions = {}): DeepgramConnection {
+    const connection = new EventEmitter() as DeepgramConnection;
+    const ws = this.createStream(options);
+
+    // Handle WebSocket events
+    ws.on('open', () => {
+      connection.emit('open');
+    });
+
+    ws.on('close', () => {
+      connection.emit('close');
+    });
+
+    ws.on('error', (error) => {
+      connection.emit('error', error);
+    });
+
+    ws.on('message', (data) => {
+      try {
+        const response = JSON.parse(data.toString());
+        if (response.type === 'Results') {
+          connection.emit('transcript', response);
+        }
+      } catch (error) {
+        logger.error('Error parsing Deepgram message:', error);
+      }
+    });
+
+    // Add send method
+    connection.send = (data: Buffer) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        this.sendAudioToStream(ws, data);
+      }
+    };
+
+    // Add finish method
+    connection.finish = () => {
+      this.closeStream(ws);
+    };
+
+    return connection;
   }
 }

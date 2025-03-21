@@ -24,6 +24,7 @@ export interface StreamingTtsOptions {
     encoding?: RawEncoding;
     bitRate?: number;
   };
+  continuationContext?: string | null;
 }
 
 // Define OutputFormat types that match Cartesia's API
@@ -54,6 +55,10 @@ interface ChunkData {
   chunk?: {
     audio: Uint8Array;
   };
+}
+
+export interface CartesiaResponse extends EventEmitter {
+  context: string;
 }
 
 export class CartesiaService extends EventEmitter {
@@ -150,7 +155,10 @@ export class CartesiaService extends EventEmitter {
    * @param text Text to convert to speech
    * @param options Streaming options
    */
-  public async streamTextToSpeech(text: string, options: StreamingTtsOptions = {}): Promise<void> {
+  public async streamTextToSpeech(text: string, options: StreamingTtsOptions = {}): Promise<CartesiaResponse> {
+    const emitter = new EventEmitter() as unknown as CartesiaResponse;
+    emitter.context = '';
+
     try {
       if (!this.apiKey) {
         throw new Error('Cartesia API key not configured');
@@ -241,8 +249,12 @@ export class CartesiaService extends EventEmitter {
           if (chunkCount === 1 || chunkCount % 5 === 0) {
             logger.info(`[${requestId}] Received audio chunk #${chunkCount}, size: ${audioChunk.length} bytes`);
           }
+          
+          emitter.emit('data', audioChunk);
         }
       }
+      
+      emitter.emit('end');
       
       const endTime = new Date();
       const duration = endTime.getTime() - startTime.getTime();
@@ -271,6 +283,8 @@ export class CartesiaService extends EventEmitter {
         timestamp: endTime.toISOString(),
         expectedAudioDuration: expectedDurationMs
       });
+      
+      return emitter;
       
     } catch (error) {
       const errorTime = new Date();

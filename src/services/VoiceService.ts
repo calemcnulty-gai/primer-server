@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
-import { DeepgramService } from './DeepgramService';
-import { CartesiaService } from './CartesiaService';
+import { DeepgramService, DeepgramConnection } from './DeepgramService';
+import { CartesiaService, CartesiaResponse } from './CartesiaService';
 import { WebRTCService, WebRTCMessage } from './WebRTCService';
 import { createLogger } from '../utils/logger';
 
@@ -13,6 +13,7 @@ interface AudioSession {
   audioBuffer: Buffer[];      // Buffer to collect audio chunks
   totalAudioReceived: number; // Track total bytes received
   stream?: any;              // Active MediaStream
+  deepgramConnection?: DeepgramConnection; // Active Deepgram connection
 }
 
 export class VoiceService extends EventEmitter {
@@ -306,12 +307,15 @@ export class VoiceService extends EventEmitter {
       session.stream = stream;
 
       // Create a live transcription connection to Deepgram
-      const deepgramConnection = this.deepgramService.createLiveTranscription({
+      const deepgramConnection = this.deepgramService.createConnection({
         model: "nova-3",
         language: "en-US",
         smart_format: true,
         interim_results: true
       });
+
+      // Store the connection in the session
+      session.deepgramConnection = deepgramConnection;
 
       // Track transcription state for streaming to Cartesia
       let currentContext: string | null = null;
@@ -370,16 +374,19 @@ export class VoiceService extends EventEmitter {
 
       // Pipe the audio stream to Deepgram
       stream.on('data', (chunk) => {
-        if (session.isListening) {
-          deepgramConnection.send(chunk);
+        if (session.isListening && session.deepgramConnection) {
+          session.deepgramConnection.send(chunk);
         }
       });
 
       // Clean up when the track ends
       audioTracks[0].onended = () => {
         logger.info(`Audio track ended for ${connectionId}`);
-        deepgramConnection.finish();
+        if (session.deepgramConnection) {
+          session.deepgramConnection.finish();
+        }
         session.stream = undefined;
+        session.deepgramConnection = undefined;
       };
 
     } catch (error) {
@@ -393,13 +400,13 @@ export class VoiceService extends EventEmitter {
   private async streamToCartesia(connectionId: string, text: string, context: string | null = null): Promise<string> {
     try {
       const response = await this.cartesiaService.streamTextToSpeech(text, {
-        context,
+        continuationContext: context,
         outputFormat: {
           container: 'raw',
           sampleRate: 16000,
           encoding: 'pcm_s16le'
         }
-      });
+      }) as CartesiaResponse;
 
       // Send the audio data through WebRTC
       this.webrtcService.sendMessage(connectionId, { type: 'speaking-start' });
