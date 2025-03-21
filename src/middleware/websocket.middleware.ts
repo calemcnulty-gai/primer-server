@@ -4,7 +4,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { VoiceControllerInterface } from '../controllers/voiceController';
 import { WebRTCService } from '../services/WebRTCService';
 import { Request, Response, NextFunction } from 'express';
-import { logger } from '../utils/logger';
+import { createLogger } from '../utils/logger';
+
+const logger = createLogger('WebSocketMiddleware');
 
 /**
  * WebSocket middleware for handling voice connections
