@@ -307,6 +307,12 @@ export class VoiceService extends EventEmitter {
           this.sendMessage(connectionId, { type: 'heartbeat-ack' });
           break;
           
+        case 'ping':
+          // Handle ping messages from client (alternative heartbeat mechanism)
+          logger.debug(`Received ping from ${connectionId}`);
+          this.sendMessage(connectionId, { type: 'pong' });
+          break;
+          
         default:
           logger.warn(`Unknown message type: ${data.type} from connection ${connectionId}`);
       }
