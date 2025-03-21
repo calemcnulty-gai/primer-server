@@ -360,4 +360,16 @@ export class WebRTCService extends EventEmitter {
     const connection = this.connections.get(connectionId);
     return !!(connection?.connected && connection.state === 'connected');
   }
+
+  /**
+   * Get the WebRTC configuration for clients
+   */
+  public getRTCConfig(): { iceServers: Array<{ urls: string }> } {
+    return {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    };
+  }
 } 
