@@ -937,48 +937,46 @@ export class VoiceService extends EventEmitter {
       try {
         logger.info(`[${requestId}] Starting Cartesia streaming TTS for: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
         
-        // Set up event handlers for the Cartesia streaming service
-        const audioChunks: Buffer[] = [];
+        // Track streaming state
+        let chunkCount = 0;
+        let totalBytesSent = 0;
         
         // Handle stream start
         this.cartesiaService.once('streamStart', () => {
           logger.info(`[${requestId}] Cartesia streaming TTS started for ${connectionId}`);
+          // Notify client that audio streaming is beginning
+          this.sendMessage(connectionId, { type: 'speaking-begin' });
         });
         
         // Handle audio chunks
         this.cartesiaService.on('audioChunk', async (data) => {
           const { audio, chunkIndex } = data;
           
-          // Store the chunk for potential later use
-          audioChunks.push(audio);
+          chunkCount++;
+          totalBytesSent += audio.length;
           
           logger.debug(`[${requestId}] Received audio chunk #${chunkIndex} (${audio.length} bytes) from Cartesia for ${connectionId}`);
           
-          // Send the audio chunk to the client
-          // For simplicity, we'll buffer the chunks and send them at the end
-          // In a real-time scenario, you would stream each chunk as it arrives
+          try {
+            // Send each chunk immediately as it arrives for smoother playback
+            await this.sendAudioChunkToClient(connectionId, requestId, audio, chunkIndex);
+          } catch (err) {
+            logger.error(`[${requestId}] Error sending chunk #${chunkIndex} to client ${connectionId}:`, err);
+            // Continue processing despite errors with individual chunks
+          }
         });
         
         // Handle stream end
         this.cartesiaService.once('streamEnd', async (data) => {
-          const { chunkCount, totalBytes } = data;
-          logger.info(`[${requestId}] Cartesia streaming TTS completed: ${chunkCount} chunks, ${totalBytes} bytes for ${connectionId}`);
+          logger.info(`[${requestId}] Cartesia streaming TTS completed: ${chunkCount} chunks, ${totalBytesSent} bytes for ${connectionId}`);
           
-          // Combine all chunks into a single audio buffer
-          const combinedAudio = Buffer.concat(audioChunks);
+          // Send end-of-stream marker to client
+          this.sendMessage(connectionId, { type: 'speaking-end' });
           
-          // Send the combined audio to the client
-          try {
-            await this.sendAudioToClient(connectionId, combinedAudio);
-            
-            // Clean up event listeners
-            this.cartesiaService.removeAllListeners('audioChunk');
-            
-            resolve();
-          } catch (sendError) {
-            logger.error(`[${requestId}] Error sending streaming audio to client ${connectionId}:`, sendError);
-            reject(sendError);
-          }
+          // Clean up event listeners
+          this.cartesiaService.removeAllListeners('audioChunk');
+          
+          resolve();
         });
         
         // Handle stream errors
@@ -1008,6 +1006,77 @@ export class VoiceService extends EventEmitter {
         reject(error);
       }
     });
+  }
+
+  /**
+   * Send a single audio chunk to the client
+   * @param connectionId Client connection ID
+   * @param requestId Request tracking ID
+   * @param audioChunk Single audio chunk from Cartesia
+   * @param chunkIndex Sequential index of this chunk
+   */
+  private async sendAudioChunkToClient(connectionId: string, requestId: string, audioChunk: Buffer, chunkIndex: number): Promise<void> {
+    const connection = this.connections.get(connectionId);
+    if (!connection) {
+      logger.warn(`[${requestId}] Cannot send chunk to disconnected client: ${connectionId}`);
+      return;
+    }
+    
+    try {
+      // Skip sending very small chunks which may be heartbeats or control messages
+      if (audioChunk.length < 10) {
+        logger.debug(`[${requestId}] Skipping tiny chunk #${chunkIndex} (${audioChunk.length} bytes) - likely a control message`);
+        return;
+      }
+      
+      let success = false;
+      
+      // First try WebRTC for lower latency if it's available and connected
+      if (connection.peer && connection.peer.connected) {
+        try {
+          connection.peer.send(audioChunk);
+          success = true;
+          
+          if (chunkIndex === 1 || chunkIndex % 10 === 0) {
+            logger.debug(`[${requestId}] Sent chunk #${chunkIndex} (${audioChunk.length} bytes) via WebRTC to ${connectionId}`);
+          }
+        } catch (webrtcError) {
+          logger.error(`[${requestId}] Failed to send chunk #${chunkIndex} via WebRTC:`, webrtcError);
+          // Fall back to WebSocket
+        }
+      }
+      
+      // Fall back to WebSocket if WebRTC didn't work or isn't available
+      if (!success && connection.ws.readyState === 1) { // 1 = OPEN
+        try {
+          await new Promise<void>((resolve, reject) => {
+            connection.ws.send(audioChunk, { binary: true }, (err: Error | null) => {
+              if (err) {
+                reject(err);
+              } else {
+                resolve();
+              }
+            });
+          });
+          
+          if (chunkIndex === 1 || chunkIndex % 10 === 0) {
+            logger.debug(`[${requestId}] Sent chunk #${chunkIndex} (${audioChunk.length} bytes) via WebSocket to ${connectionId}`);
+          }
+          
+          success = true;
+        } catch (wsError) {
+          logger.error(`[${requestId}] Failed to send chunk #${chunkIndex} via WebSocket:`, wsError);
+          throw wsError;
+        }
+      }
+      
+      if (!success) {
+        throw new Error(`All audio delivery methods unavailable for chunk #${chunkIndex}`);
+      }
+    } catch (error) {
+      logger.error(`[${requestId}] Error sending audio chunk #${chunkIndex} to ${connectionId}:`, error);
+      throw error;
+    }
   }
 
   /**
