@@ -173,7 +173,23 @@ export class WebRTCService extends EventEmitter {
    */
   public isConnected(connectionId: string): boolean {
     const connection = this.connections.get(connectionId);
-    return !!(connection && connection.connected && connection.peer && connection.peer.connected);
+    
+    // Enhanced logging to debug connection state issues
+    if (connection) {
+      const peerState = connection.peer?._pc?.connectionState || 'unknown';
+      const iceState = connection.peer?._pc?.iceConnectionState || 'unknown';
+      
+      // Debug logging for connection state checks (for troubleshooting only)
+      logger.debug(`Connection check for ${connectionId}: internal=${connection.state}, connected=${connection.connected}, peer=${peerState}, ice=${iceState}`);
+      
+      // Simplified connection check focused on peer connection
+      return connection.connected && connection.peer && (
+        // Check both connection state and ice connection state
+        (peerState === 'connected' || iceState === 'connected' || iceState === 'completed')
+      );
+    }
+    
+    return false;
   }
   
   /**
@@ -249,11 +265,27 @@ export class WebRTCService extends EventEmitter {
       
       peer.on('connect', () => {
         logger.info(`WebRTC connection established for ${connectionId}`);
+        
+        // Check and log the actual ICE connection state
+        const iceState = peer._pc?.iceConnectionState || 'unknown';
+        const connState = peer._pc?.connectionState || 'unknown';
+        logger.info(`WebRTC states for ${connectionId}: ice=${iceState}, connection=${connState}`);
+        
+        // Update connection state
         connection.state = 'connected';
         connection.connected = true;
         
+        // Force update peer.connected to ensure consistency
+        if (!peer.connected) {
+          logger.warn(`Peer.connected was false for ${connectionId} despite connect event, forcing to true`);
+          peer.connected = true;
+        }
+        
         // Notify that the connection is ready
         this.emit('connection:ready', connectionId);
+        
+        // Send a connection-established message to the client
+        this.sendMessage(connectionId, { type: 'connection-established' });
       });
       
       peer.on('data', (chunk: Buffer) => {
@@ -294,7 +326,30 @@ export class WebRTCService extends EventEmitter {
     if (!connection || !connection.peer) return;
     
     try {
+      // Log ICE candidate for debugging
+      if (data.candidate) {
+        logger.debug(`Processing ICE candidate for ${connectionId}: ${data.candidate.substring(0, 50)}...`);
+      }
+      
+      // Signal the peer with the ICE candidate
       connection.peer.signal(data);
+      
+      // Check if ice connection state has changed and might now be connected
+      setTimeout(() => {
+        const peerConn = connection.peer?._pc;
+        if (peerConn && 
+           (peerConn.iceConnectionState === 'connected' || peerConn.iceConnectionState === 'completed') && 
+           !connection.connected) {
+          
+          logger.info(`ICE connection state changed to ${peerConn.iceConnectionState} for ${connectionId}, updating connection status`);
+          connection.connected = true;
+          connection.state = 'connected';
+          
+          // Emit connection:ready if not already done
+          this.emit('connection:ready', connectionId);
+        }
+      }, 500); // Small delay to allow the state to update
+      
     } catch (error) {
       logger.error(`Failed to process ICE candidate from ${connectionId}:`, error);
     }

@@ -46,12 +46,30 @@ export class VoiceService extends EventEmitter {
     // Handle new connections
     this.webrtcService.on('connection:new', (connectionId: string) => {
       logger.info(`New WebRTC connection initiated: ${connectionId}`);
+      // Don't create session yet, wait for connection:ready
     });
     
     // Handle established connections
     this.webrtcService.on('connection:ready', (connectionId: string) => {
       logger.info(`WebRTC connection ready for ${connectionId}, creating voice session`);
+      
+      // Create voice session only when WebRTC is actually ready
       this.createSession(connectionId);
+      
+      // Verify connection state after a small delay to ensure stability
+      setTimeout(() => {
+        if (this.webrtcService.isConnected(connectionId)) {
+          logger.info(`WebRTC connection verified as stable for ${connectionId}`);
+          
+          // Send a confirmation message to the client
+          this.webrtcService.sendMessage(connectionId, { 
+            type: 'voice-session-ready',
+            message: 'Voice session is ready to accept commands'
+          });
+        } else {
+          logger.warn(`WebRTC connection appears unstable for ${connectionId} despite ready event`);
+        }
+      }, 1000);
     });
     
     // Handle closed connections
@@ -67,7 +85,20 @@ export class VoiceService extends EventEmitter {
     
     // Handle client messages
     this.webrtcService.on('message', (connectionId: string, message: WebRTCMessage) => {
+      logger.debug(`WebRTC message received from ${connectionId}: ${message.type}`);
       this.handleClientMessage(connectionId, message);
+    });
+    
+    // Handle errors
+    this.webrtcService.on('error', (connectionId: string, code: string, message: string) => {
+      logger.error(`WebRTC error for ${connectionId}: ${code} - ${message}`);
+      
+      // If there's a voice session, we should stop listening
+      const session = this.sessions.get(connectionId);
+      if (session && session.isListening) {
+        logger.info(`Stopping listening due to WebRTC error for ${connectionId}`);
+        session.isListening = false;
+      }
     });
   }
 
@@ -157,28 +188,44 @@ export class VoiceService extends EventEmitter {
    */
   private handleAudioData(connectionId: string, audioChunk: Buffer): void {
     const session = this.sessions.get(connectionId);
-    if (!session || !session.isListening) return;
+    if (!session) {
+      logger.warn(`Received audio data for nonexistent session: ${connectionId}`);
+      return;
+    }
+    
+    if (!session.isListening) {
+      // This is common as audio might still flow, but we're not processing it
+      logger.debug(`Ignoring audio data from ${connectionId} - not in listening mode`);
+      return;
+    }
     
     // Skip very small chunks (likely heartbeats or control messages)
-    if (audioChunk.length < 50) return;
+    if (audioChunk.length < 50) {
+      return;
+    }
     
     // Update stats
     session.totalAudioReceived += audioChunk.length;
     session.audioBuffer.push(audioChunk);
     
+    // Track audio reception for debugging
+    if (session.totalAudioReceived % 8000 === 0) {
+      logger.info(`Audio reception milestone: ${session.totalAudioReceived} total bytes from ${connectionId}`);
+    }
+    
     // Debug logging for audio data reception
     console.log('[DEBUG] Server received audio data:', {
       connectionId: connectionId,
       bytesReceived: audioChunk.length,
+      totalReceived: session.totalAudioReceived,
+      bufferChunks: session.audioBuffer.length,
       timestamp: Date.now()
     });
-    
-    logger.debug(`Received ${audioChunk.length} bytes of audio over WebRTC from ${connectionId}`);
     
     // Process audio when we've collected enough data (8KB)
     const totalSize = session.audioBuffer.reduce((sum, buffer) => sum + buffer.length, 0);
     if (totalSize > 8000) {
-      logger.info(`Collected ${totalSize} bytes of audio, processing for ${connectionId}`);
+      logger.info(`Collected ${totalSize} bytes of audio (${session.audioBuffer.length} chunks), processing for ${connectionId}`);
       this.processAudio(connectionId);
     }
   }
@@ -188,13 +235,40 @@ export class VoiceService extends EventEmitter {
    */
   public startListening(connectionId: string): void {
     const session = this.sessions.get(connectionId);
-    if (!session || session.isListening) return;
-
-    // Ensure WebRTC is connected before listening
-    if (!this.webrtcService.isConnected(connectionId)) {
-      logger.warn(`Cannot start listening for ${connectionId}: WebRTC not connected`);
-      this.webrtcService.sendError(connectionId, 'WEBRTC_NOT_CONNECTED', 'WebRTC connection required for audio streaming');
+    if (!session) {
+      logger.warn(`Cannot start listening: No session exists for ${connectionId}`);
+      this.webrtcService.sendError(connectionId, 'NO_SESSION', 'No voice session exists');
       return;
+    }
+    
+    if (session.isListening) {
+      logger.info(`Already listening to ${connectionId}, sending confirmation`);
+      // Send confirmation even if already listening to ensure client is in sync
+      this.webrtcService.sendMessage(connectionId, { type: 'listening-started' });
+      return;
+    }
+
+    // Check WebRTC connection state
+    const isConnected = this.webrtcService.isConnected(connectionId);
+    const peerConnection = this.webrtcService.getPeerConnection(connectionId);
+    
+    logger.info(`WebRTC connection check for ${connectionId}: ${isConnected ? 'connected' : 'disconnected'}`);
+    
+    if (!isConnected) {
+      // Extra connection state debugging
+      const peerState = peerConnection?.connectionState || 'unknown';
+      const iceState = peerConnection?.iceConnectionState || 'unknown';
+      
+      logger.warn(`Cannot start listening for ${connectionId}: WebRTC appears disconnected. States: peer=${peerState}, ice=${iceState}`);
+      
+      // Try to recover connection instead of just sending error
+      if (iceState === 'connected' || iceState === 'completed') {
+        logger.info(`ICE appears connected for ${connectionId}, attempting to proceed despite connection check failure`);
+        // Force proceed despite connection check
+      } else {
+        this.webrtcService.sendError(connectionId, 'WEBRTC_NOT_CONNECTED', 'WebRTC connection required for audio streaming');
+        return;
+      }
     }
 
     // Reset audio buffer and start listening
@@ -202,7 +276,13 @@ export class VoiceService extends EventEmitter {
     session.isListening = true;
     
     logger.info(`Started listening to ${connectionId}`);
-    this.webrtcService.sendMessage(connectionId, { type: 'listening-started' });
+    
+    // IMPORTANT: Send confirmation that we've started listening
+    const success = this.webrtcService.sendMessage(connectionId, { type: 'listening-started' });
+    
+    if (!success) {
+      logger.error(`Failed to send listening-started message to ${connectionId}`);
+    }
   }
 
   /**
