@@ -133,7 +133,7 @@ export class VoiceService extends EventEmitter {
           }
         } catch (e) {
           // Not valid JSON, continue to audio processing
-          logger.debug(`Failed to parse binary as JSON: ${e.message}`);
+          logger.debug(`Failed to parse binary as JSON: ${e instanceof Error ? e.message : String(e)}`);
         }
         
         // Handle as binary audio data
