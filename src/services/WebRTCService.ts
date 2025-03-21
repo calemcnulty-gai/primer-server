@@ -31,8 +31,8 @@ export interface WebRTCEvents {
   'connection:ready': (connectionId: string) => void;
   'connection:closed': (connectionId: string) => void;
   
-  // Data events
-  'data': (connectionId: string, data: Buffer) => void;
+  // Stream events
+  'stream': (connectionId: string, stream: any) => void;
   
   // Message events
   'message': (connectionId: string, message: WebRTCMessage) => void;
@@ -332,7 +332,7 @@ export class WebRTCService extends EventEmitter {
         });
 
         // Emit the stream for audio processing
-        this.emit('data', connectionId, stream);
+        this.emit('stream', connectionId, stream);
       });
       
       // Set up peer event handlers

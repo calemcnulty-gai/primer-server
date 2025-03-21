@@ -12,6 +12,7 @@ interface AudioSession {
   isListening: boolean;       // Whether we're currently listening
   audioBuffer: Buffer[];      // Buffer to collect audio chunks
   totalAudioReceived: number; // Track total bytes received
+  stream?: any;              // Active MediaStream
 }
 
 export class VoiceService extends EventEmitter {
@@ -78,9 +79,9 @@ export class VoiceService extends EventEmitter {
       this.deleteSession(connectionId);
     });
     
-    // Handle data (audio chunks)
-    this.webrtcService.on('data', (connectionId: string, data: Buffer) => {
-      this.handleAudioData(connectionId, data);
+    // Handle incoming audio stream
+    this.webrtcService.on('stream', (connectionId: string, stream: any) => {
+      this.handleAudioStream(connectionId, stream);
     });
     
     // Handle client messages
@@ -279,51 +280,146 @@ export class VoiceService extends EventEmitter {
   }
 
   /**
-   * Handle incoming audio data from client
+   * Handle incoming audio stream from client
    */
-  private handleAudioData(connectionId: string, audioChunk: Buffer): void {
+  private handleAudioStream(connectionId: string, stream: any): void {
     const session = this.sessions.get(connectionId);
     if (!session) {
-      logger.warn(`Received audio data for nonexistent session: ${connectionId}`);
+      logger.warn(`Received audio stream for nonexistent session: ${connectionId}`);
       return;
     }
-    
-    // Enhanced session state and audio data logging
-    logger.debug(`Audio data received: connectionId=${connectionId}, size=${audioChunk.length} bytes, isListening=${session.isListening}, totalReceived=${session.totalAudioReceived}, bufferChunks=${session.audioBuffer.length}`);
-    
+
     if (!session.isListening) {
-      // This is common as audio might still flow, but we're not processing it
-      logger.debug(`Ignoring audio data from ${connectionId} - not in listening mode`);
+      logger.debug(`Ignoring audio stream from ${connectionId} - not in listening mode`);
       return;
     }
-    
-    // Skip very small chunks (likely control data)
-    if (audioChunk.length < 2) {
-      return; // Silently ignore control packets
-    }
-    
-    // Validate audio chunk size (typical Opus frame sizes are 120-960 bytes)
-    if (audioChunk.length < 50 || audioChunk.length > 4000) {
-      logger.debug(`Unusual audio chunk size from ${connectionId}: ${audioChunk.length} bytes`);
-      return;
-    }
-    
-    // Update stats and buffer the audio
-    session.totalAudioReceived += audioChunk.length;
-    session.audioBuffer.push(audioChunk);
-    
-    // Track audio reception milestones
-    if (session.totalAudioReceived % 2000 === 0) {
-      logger.info(`Audio milestone for ${connectionId}: received=${session.totalAudioReceived} bytes, chunks=${session.audioBuffer.length}`);
-    }
-    
-    // Process audio when we've collected enough data (lowered threshold for faster response)
-    const totalSize = session.audioBuffer.reduce((sum, buffer) => sum + buffer.length, 0);
-    if (totalSize >= 4000) { // ~250ms of audio at 16kHz/16-bit
-      logger.info(`Processing audio buffer: size=${totalSize} bytes, chunks=${session.audioBuffer.length}, connectionId=${connectionId}`);
-      this.processAudio(connectionId).catch(error => {
-        logger.error(`Failed to process audio for ${connectionId}:`, error);
+
+    try {
+      // Get audio tracks from the stream
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        logger.warn(`No audio tracks found in stream from ${connectionId}`);
+        return;
+      }
+
+      // Store the stream reference
+      session.stream = stream;
+
+      // Create a live transcription connection to Deepgram
+      const deepgramConnection = this.deepgramService.createLiveTranscription({
+        model: "nova-3",
+        language: "en-US",
+        smart_format: true,
+        interim_results: true
       });
+
+      // Track transcription state for streaming to Cartesia
+      let currentContext: string | null = null;
+      let lastTranscript = '';
+      let isFirstUtterance = true;
+
+      // Handle transcription events
+      deepgramConnection.on('open', () => {
+        logger.info(`Deepgram connection opened for ${connectionId}`);
+      });
+
+      deepgramConnection.on('close', () => {
+        logger.info(`Deepgram connection closed for ${connectionId}`);
+        currentContext = null;
+      });
+
+      deepgramConnection.on('transcript', async (data) => {
+        const transcript = data.channel.alternatives[0].transcript;
+        const isFinal = data.is_final;
+
+        // Log the transcript with its state
+        logger.info(`Transcription for ${connectionId}: "${transcript}" (${isFinal ? 'final' : 'interim'})`);
+
+        // Only process non-empty transcripts
+        if (transcript.trim()) {
+          // For final transcripts, we want to stream to Cartesia
+          if (isFinal) {
+            try {
+              // If this is our first utterance, we send it as is
+              if (isFirstUtterance) {
+                logger.info(`Sending first utterance to Cartesia: "${transcript}"`);
+                currentContext = await this.streamToCartesia(connectionId, transcript);
+                isFirstUtterance = false;
+              } else {
+                // For subsequent utterances, we need to handle continuations properly
+                // Ensure proper spacing between utterances
+                const continuationText = transcript.startsWith(' ') ? transcript : ' ' + transcript;
+                logger.info(`Sending continuation to Cartesia: "${continuationText}" (context: ${currentContext})`);
+                currentContext = await this.streamToCartesia(connectionId, continuationText, currentContext);
+              }
+              lastTranscript = transcript;
+            } catch (error) {
+              logger.error(`Error streaming to Cartesia for ${connectionId}:`, error);
+            }
+          } else {
+            // For interim results, just log them
+            logger.debug(`Interim transcript for ${connectionId}: "${transcript}"`);
+          }
+        }
+      });
+
+      deepgramConnection.on('error', (err) => {
+        logger.error(`Deepgram error for ${connectionId}:`, err);
+        currentContext = null;
+      });
+
+      // Pipe the audio stream to Deepgram
+      stream.on('data', (chunk) => {
+        if (session.isListening) {
+          deepgramConnection.send(chunk);
+        }
+      });
+
+      // Clean up when the track ends
+      audioTracks[0].onended = () => {
+        logger.info(`Audio track ended for ${connectionId}`);
+        deepgramConnection.finish();
+        session.stream = undefined;
+      };
+
+    } catch (error) {
+      logger.error(`Error handling audio stream for ${connectionId}:`, error);
+    }
+  }
+
+  /**
+   * Stream text to Cartesia with continuation support
+   */
+  private async streamToCartesia(connectionId: string, text: string, context: string | null = null): Promise<string> {
+    try {
+      const response = await this.cartesiaService.streamTextToSpeech(text, {
+        context,
+        outputFormat: {
+          container: 'raw',
+          sampleRate: 16000,
+          encoding: 'pcm_s16le'
+        }
+      });
+
+      // Send the audio data through WebRTC
+      this.webrtcService.sendMessage(connectionId, { type: 'speaking-start' });
+
+      // Handle the streaming response
+      response.on('data', (audioChunk: Buffer) => {
+        this.webrtcService.sendData(connectionId, audioChunk);
+      });
+
+      // Handle end of stream
+      response.on('end', () => {
+        this.webrtcService.sendMessage(connectionId, { type: 'speaking-end' });
+      });
+
+      // Return the context for the next continuation
+      return response.context;
+
+    } catch (error) {
+      logger.error(`Error streaming to Cartesia:`, error);
+      throw error;
     }
   }
 
