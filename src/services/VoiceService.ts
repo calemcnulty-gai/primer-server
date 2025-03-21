@@ -1,8 +1,9 @@
 import { EventEmitter } from 'events';
-import { DeepgramService, DeepgramConnection } from './DeepgramService';
+import { DeepgramService } from './DeepgramService';
 import { CartesiaService, CartesiaResponse } from './CartesiaService';
-import { WebRTCService, WebRTCMessage } from './WebRTCService';
+import { WebRTCService } from './WebRTCService';
 import { createLogger } from '../utils/logger';
+import { RTCPeerConnection, RTCRtpReceiver } from 'werift-webrtc';
 
 const logger = createLogger('VoiceService');
 
@@ -10,11 +11,10 @@ const logger = createLogger('VoiceService');
 interface AudioSession {
   connectionId: string;       // Associated connection ID
   isListening: boolean;       // Whether we're currently listening
-  audioBuffer: Buffer[];      // Buffer to collect audio chunks
   totalAudioReceived: number; // Track total bytes received
   stream?: any;              // Active MediaStream
-  deepgramConnection?: DeepgramConnection; // Active Deepgram connection
-  audioSink?: any;  // RTCAudioSink for processing audio - use any type since we're requiring dynamically
+  deepgramConnection?: any;   // Active Deepgram connection
+  peerConnection?: RTCPeerConnection; // WebRTC peer connection
 }
 
 export class VoiceService extends EventEmitter {
@@ -49,7 +49,6 @@ export class VoiceService extends EventEmitter {
     // Handle new connections
     this.webrtcService.on('connection:new', (connectionId: string) => {
       logger.info(`New WebRTC connection initiated: ${connectionId}`);
-      // Don't create session yet, wait for connection:ready
     });
     
     // Handle established connections
@@ -102,7 +101,7 @@ export class VoiceService extends EventEmitter {
     });
     
     // Handle client messages
-    this.webrtcService.on('message', (connectionId: string, message: WebRTCMessage) => {
+    this.webrtcService.on('message', (connectionId: string, message: any) => {
       logger.debug(`WebRTC message received from ${connectionId}: ${message.type}`);
       this.handleClientMessage(connectionId, message);
     });
@@ -151,7 +150,6 @@ export class VoiceService extends EventEmitter {
     const session: AudioSession = {
       connectionId,
       isListening: false,
-      audioBuffer: [],
       totalAudioReceived: 0
     };
     
@@ -163,6 +161,15 @@ export class VoiceService extends EventEmitter {
    * Delete a voice session when connection is closed
    */
   private deleteSession(connectionId: string): void {
+    const session = this.sessions.get(connectionId);
+    if (session) {
+      if (session.deepgramConnection) {
+        session.deepgramConnection.finish();
+      }
+      if (session.peerConnection) {
+        session.peerConnection.close();
+      }
+    }
     this.sessions.delete(connectionId);
     logger.info(`Deleted voice session for ${connectionId}`);
   }
@@ -170,7 +177,7 @@ export class VoiceService extends EventEmitter {
   /**
    * Handle client messages related to voice service
    */
-  private handleClientMessage(connectionId: string, message: WebRTCMessage): void {
+  private handleClientMessage(connectionId: string, message: any): void {
     logger.info(`Processing client message type: ${message.type} from ${connectionId}`);
     
     // Check if we have a session first
@@ -302,55 +309,38 @@ export class VoiceService extends EventEmitter {
   private handleAudioStream(connectionId: string, stream: any): void {
     const session = this.sessions.get(connectionId);
     if (!session) {
-      logger.warn(`Received audio stream for nonexistent session: ${connectionId}`);
+      logger.warn(`No session for ${connectionId}`);
       return;
     }
-
     if (!session.isListening) {
-      logger.debug(`Storing stream but not processing yet for ${connectionId} - not in listening mode`);
+      logger.debug(`Not listening for ${connectionId}`);
       return;
     }
-
     if (session.deepgramConnection) {
-      logger.info(`Audio processing already active for ${connectionId}, skipping duplicate setup`);
+      logger.info(`Already processing for ${connectionId}`);
       return;
     }
 
     try {
       const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        logger.warn(`No audio tracks found in stream from ${connectionId}`);
+      if (!audioTracks.length) {
+        logger.warn(`No audio tracks for ${connectionId}`);
         return;
       }
 
-      logger.info(`Processing audio stream for ${connectionId} with ${audioTracks.length} tracks`);
-      logger.debug(`Audio track details: kind=${audioTracks[0].kind}, id=${audioTracks[0].id}, readyState=${audioTracks[0].readyState}, enabled=${audioTracks[0].enabled}`);
+      logger.info(`Processing stream for ${connectionId} with ${audioTracks.length} tracks`);
+      const pc = new RTCPeerConnection();
+      session.peerConnection = pc;
 
-      // Use require for wrtc with error handling
-      let wrtc;
-      try {
-        wrtc = require('wrtc');
-        if (!wrtc.RTCAudioSink) {
-          throw new Error('RTCAudioSink not found in wrtc module');
+      // Add client stream tracks to peer connection
+      audioTracks.forEach((track: any) => {
+        try {
+          pc.addTransceiver(track, { direction: 'sendrecv' });
+        } catch (error) {
+          logger.error(`Error adding track to peer connection: ${error}`);
         }
-        logger.debug(`RTCAudioSink accessed successfully from wrtc module`);
-      } catch (wrtcError) {
-        logger.error(`Failed to load RTCAudioSink from wrtc:`, wrtcError);
-        throw wrtcError;
-      }
+      });
 
-      // Create RTCAudioSink with error handling
-      let audioSink;
-      try {
-        audioSink = new wrtc.RTCAudioSink(audioTracks[0]);
-        logger.debug(`RTCAudioSink created successfully for track ${audioTracks[0].id}`);
-      } catch (sinkError) {
-        logger.error(`Failed to create RTCAudioSink:`, sinkError);
-        throw sinkError;
-      }
-      session.audioSink = audioSink;
-
-      // Create Deepgram connection
       const deepgramConnection = this.deepgramService.createConnection({
         model: "nova-2",
         language: "en-US",
@@ -362,95 +352,32 @@ export class VoiceService extends EventEmitter {
       });
       session.deepgramConnection = deepgramConnection;
 
-      // Track processing metrics
       let processedChunks = 0;
       let totalBytesProcessed = 0;
-      let silentChunksCount = 0;
-      let lastProcessTime = Date.now();
-
-      // Track transcription state
       let currentContext: string | null = null;
       let lastTranscript = '';
       let isFirstUtterance = true;
 
-      // Process audio data from RTCAudioSink
-      audioSink.ondata = (event) => {
-        if (!session.isListening || !session.deepgramConnection) {
-          logger.debug(`Skipping audio processing for ${connectionId} - not listening or no Deepgram connection`);
-          return;
-        }
-
-        const now = Date.now();
-        const timeSinceLastProcess = now - lastProcessTime;
-        lastProcessTime = now;
-
-        // Ensure we have valid audio data
-        if (!event.samples || !event.samples.length) {
-          logger.warn(`Received empty audio data from RTCAudioSink for ${connectionId}`);
-          return;
-        }
-
-        const float32Data = event.samples;
-        const pcmData = Buffer.alloc(float32Data.length * 2);
-
-        // Audio level analysis
-        let minSample = 0, maxSample = 0;
-        let sumSquares = 0;
-
-        // Convert Float32Array to 16-bit PCM with audio analysis
-        for (let i = 0; i < float32Data.length; i++) {
-          const sample = Math.max(-1, Math.min(1, float32Data[i]));
-          const pcmSample = Math.round(sample * 32767);
-          pcmData.writeInt16LE(pcmSample, i * 2);
-          
-          minSample = Math.min(minSample, sample);
-          maxSample = Math.max(maxSample, sample);
-          sumSquares += sample * sample;
-        }
-
-        // Calculate RMS for volume level
-        const rms = Math.sqrt(sumSquares / float32Data.length);
-        const isSilent = rms < 0.001; // Adjust threshold as needed
-
-        if (isSilent) {
-          silentChunksCount++;
-        } else {
-          silentChunksCount = 0;
-        }
-
-        processedChunks++;
-        totalBytesProcessed += pcmData.length;
-
-        // Detailed diagnostic logging
-        if (processedChunks % 4 === 0 || !isSilent) {
-          logger.debug(`Audio processing stats for ${connectionId}:
-            Chunk #${processedChunks}
-            Size: ${pcmData.length} bytes
-            Time since last: ${timeSinceLastProcess}ms
-            RMS: ${rms.toFixed(6)}
-            Range: ${minSample.toFixed(6)} to ${maxSample.toFixed(6)}
-            Silent chunks: ${silentChunksCount}
-            Total processed: ${totalBytesProcessed} bytes`);
-        }
-
-        // Send to Deepgram if not prolonged silence
-        if (!isSilent || silentChunksCount < 20) { // Skip after ~2 seconds of silence
-          try {
+      pc.onTrack.subscribe((event) => {
+        const track = event.track;
+        track.onReceiveRtp.subscribe((rtp) => {
+          const pcmData = this.decodePCMU(rtp.payload);
+          if (pcmData) {
+            processedChunks++;
+            totalBytesProcessed += pcmData.length;
+            logger.debug(`Chunk #${processedChunks} for ${connectionId}, size: ${pcmData.length}`);
             session.deepgramConnection.send(pcmData);
             session.totalAudioReceived += pcmData.length;
-          } catch (sendError) {
-            logger.error(`Failed to send audio data to Deepgram for ${connectionId}:`, sendError);
           }
-        }
-      };
+        });
+      });
 
-      // Setup Deepgram event handlers
       deepgramConnection.on('open', () => {
-        logger.info(`Deepgram connection opened for ${connectionId}`);
+        logger.info(`Deepgram opened for ${connectionId}`);
       });
 
       deepgramConnection.on('close', () => {
-        logger.info(`Deepgram connection closed for ${connectionId} after processing ${processedChunks} chunks (${totalBytesProcessed} bytes)`);
+        logger.info(`Deepgram closed for ${connectionId} after processing ${processedChunks} chunks (${totalBytesProcessed} bytes)`);
         currentContext = null;
       });
 
@@ -487,34 +414,33 @@ export class VoiceService extends EventEmitter {
         currentContext = null;
       });
 
-      // Cleanup on track end
       audioTracks[0].onended = () => {
-        logger.info(`Audio track ended for ${connectionId}. Stats:
+        logger.info(`Track ended for ${connectionId}. Stats:
           Total chunks processed: ${processedChunks}
           Total bytes processed: ${totalBytesProcessed}
-          Processing duration: ${((Date.now() - lastProcessTime) / 1000).toFixed(1)}s`);
+          Processing duration: ${((Date.now() - Date.now()) / 1000).toFixed(1)}s`);
 
         if (session.deepgramConnection) {
           session.deepgramConnection.finish();
           session.deepgramConnection = undefined;
         }
-        if (session.audioSink) {
-          session.audioSink.stop();
-          session.audioSink = undefined;
+        if (session.peerConnection) {
+          session.peerConnection.close();
+          session.peerConnection = undefined;
         }
         session.stream = undefined;
       };
 
       logger.info(`Audio processing pipeline established for ${connectionId}`);
     } catch (error) {
-      logger.error(`Error setting up audio processing for ${connectionId}:`, error);
+      logger.error(`Error for ${connectionId}:`, error);
       if (session.deepgramConnection) {
         session.deepgramConnection.finish();
         session.deepgramConnection = undefined;
       }
-      if (session.audioSink) {
-        session.audioSink.stop();
-        session.audioSink = undefined;
+      if (session.peerConnection) {
+        session.peerConnection.close();
+        session.peerConnection = undefined;
       }
       session.stream = undefined;
     }
@@ -534,20 +460,16 @@ export class VoiceService extends EventEmitter {
         }
       }) as CartesiaResponse;
 
-      // Send the audio data through WebRTC
       this.webrtcService.sendMessage(connectionId, { type: 'speaking-start' });
 
-      // Handle the streaming response
       response.on('data', (audioChunk: Buffer) => {
         this.webrtcService.sendData(connectionId, audioChunk);
       });
 
-      // Handle end of stream
       response.on('end', () => {
         this.webrtcService.sendMessage(connectionId, { type: 'speaking-end' });
       });
 
-      // Return the context for the next continuation
       return response.context;
 
     } catch (error) {
@@ -598,9 +520,8 @@ export class VoiceService extends EventEmitter {
     }
     
     // Reset audio buffer and start listening
-    session.audioBuffer = [];
-    session.isListening = true;
     session.totalAudioReceived = 0;
+    session.isListening = true;
     
     logger.info(`Started listening to ${connectionId} (isListening=${session.isListening})`);
     
@@ -635,83 +556,39 @@ export class VoiceService extends EventEmitter {
     logger.info(`Stopped listening to ${connectionId}`);
 
     // Clean up audio processing
-    if (session.audioSink) {
-      session.audioSink.stop();
-      session.audioSink = undefined;
-    }
     if (session.deepgramConnection) {
       session.deepgramConnection.finish();
       session.deepgramConnection = undefined;
     }
+    if (session.peerConnection) {
+      session.peerConnection.close();
+      session.peerConnection = undefined;
+    }
 
     this.webrtcService.sendMessage(connectionId, { type: 'listening-stopped' });
-    
-    // Process any collected audio
-    if (session.audioBuffer.length > 0) {
-      this.processAudio(connectionId);
-    }
   }
-  
-  /**
-   * Process collected audio data
-   */
-  private async processAudio(connectionId: string): Promise<void> {
-    const session = this.sessions.get(connectionId);
-    if (!session || session.audioBuffer.length === 0) return;
-    
-    const requestId = Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
-    
+
+  private decodePCMU(payload: Buffer): Buffer | null {
     try {
-      // Combine audio chunks
-      const audioData = Buffer.concat(session.audioBuffer);
-      logger.info(`[${requestId}] Processing ${audioData.length} bytes of audio from ${connectionId}`);
-      
-      // Clear the buffer
-      session.audioBuffer = [];
-      
-      try {
-        // Step 1: Transcribe audio using Deepgram
-        const transcribedText = await this.deepgramService.transcribeAudio(audioData);
-        
-        if (!transcribedText || transcribedText.trim() === '') {
-          logger.warn(`[${requestId}] Empty transcription result for ${connectionId}`);
-          const defaultResponse = "I couldn't hear that clearly. Could you please speak again?";
-          await this.streamResponseToClient(connectionId, requestId, defaultResponse);
-          this.startListening(connectionId);
-          return;
-        }
-        
-        logger.info(`[${requestId}] Transcribed: "${transcribedText.substring(0, 100)}${transcribedText.length > 100 ? '...' : ''}"`);
-        
-        // Step 2: Create echo response
-        logger.info(`[${requestId}] Creating echo response for ${connectionId}`);
-        
-        // Simple echo response - exactly what was requested
-        const responseText = `You said: ${transcribedText}`;
-        
-        // Step 3: Stream response back to client over WebRTC
-        await this.streamResponseToClient(connectionId, requestId, responseText);
-        
-        // Resume listening
-        this.startListening(connectionId);
-      } catch (transcriptionError) {
-        logger.error(`[${requestId}] Transcription error: ${transcriptionError}`);
-        const errorMessage = "I'm having trouble processing your speech. Could you please try again?";
-        await this.streamResponseToClient(connectionId, requestId, errorMessage);
-        this.startListening(connectionId);
+      const pcmData = Buffer.alloc(payload.length * 2); // 16-bit PCM from 8-bit mu-law
+      for (let i = 0; i < payload.length; i++) {
+        const mulaw = ~payload[i]; // Invert bits
+        const sign = mulaw & 0x80;
+        const exponent = (mulaw & 0x70) >> 4;
+        const mantissa = mulaw & 0x0F;
+        let sample = (mantissa << 4) + 16;
+        sample <<= exponent;
+        sample = sign ? -sample : sample;
+        pcmData.writeInt16LE(sample, i * 2);
       }
+      return pcmData;
     } catch (error) {
-      logger.error(`[${requestId}] Critical error processing audio for ${connectionId}:`, error);
-      this.webrtcService.sendError(connectionId, 'PROCESSING_ERROR', 'Failed to process audio');
-      this.startListening(connectionId);
+      logger.error('PCMU decode error:', error);
+      return null;
     }
   }
-  
-  /**
-   * Stream a text response to the client using Cartesia and WebRTC
-   */
+
   private async streamResponseToClient(connectionId: string, requestId: string, text: string): Promise<void> {
-    // Ensure WebRTC is connected
     if (!this.webrtcService.isConnected(connectionId)) {
       logger.error(`[${requestId}] Cannot stream response: WebRTC not connected for ${connectionId}`);
       this.webrtcService.sendError(connectionId, 'WEBRTC_NOT_CONNECTED', 'WebRTC connection required for audio streaming');
@@ -722,7 +599,6 @@ export class VoiceService extends EventEmitter {
       logger.info(`[${requestId}] Streaming response: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
       this.webrtcService.sendMessage(connectionId, { type: 'speaking-start' });
       
-      // Stream audio response through Cartesia -> WebRTC
       return this.streamTTSOverWebRTC(connectionId, requestId, text);
       
     } catch (error) {
@@ -730,36 +606,28 @@ export class VoiceService extends EventEmitter {
       this.webrtcService.sendError(connectionId, 'TTS_ERROR', 'Failed to generate speech response');
     }
   }
-  
-  /**
-   * Stream TTS response over WebRTC
-   */
+
   private async streamTTSOverWebRTC(connectionId: string, requestId: string, text: string): Promise<void> {
     if (!this.webrtcService.isConnected(connectionId)) return;
     
     return new Promise<void>((resolve, reject) => {
       try {
-        // Track streaming state
         let chunkCount = 0;
         
-        // Handle stream start
         this.cartesiaService.once('streamStart', () => {
           this.webrtcService.sendMessage(connectionId, { type: 'speaking-begin' });
         });
         
-        // Handle audio chunks - send each directly over WebRTC
         this.cartesiaService.on('audioChunk', (data) => {
           const { audio, chunkIndex } = data;
           chunkCount++;
           
           try {
-            // Send chunk over WebRTC
             const sent = this.webrtcService.sendData(connectionId, audio);
             
             if (!sent) {
               logger.warn(`[${requestId}] Failed to send audio chunk #${chunkIndex}`);
               
-              // If WebRTC is disconnected, stop streaming
               if (!this.webrtcService.isConnected(connectionId)) {
                 logger.warn(`[${requestId}] WebRTC disconnected during streaming`);
                 this.cartesiaService.removeAllListeners('audioChunk');
@@ -768,7 +636,6 @@ export class VoiceService extends EventEmitter {
               }
             }
             
-            // Log progress
             if (chunkIndex % 20 === 0) {
               logger.debug(`[${requestId}] Sent ${chunkIndex} audio chunks so far...`);
             }
@@ -777,7 +644,6 @@ export class VoiceService extends EventEmitter {
           }
         });
         
-        // Handle stream end
         this.cartesiaService.once('streamEnd', () => {
           logger.info(`[${requestId}] Completed streaming ${chunkCount} chunks to ${connectionId}`);
           this.webrtcService.sendMessage(connectionId, { type: 'speaking-end' });
@@ -785,19 +651,17 @@ export class VoiceService extends EventEmitter {
           resolve();
         });
         
-        // Handle stream errors
         this.cartesiaService.once('streamError', (error) => {
           logger.error(`[${requestId}] Streaming error:`, error);
           this.cartesiaService.removeAllListeners('audioChunk');
           reject(error);
         });
         
-        // Start streaming TTS
         this.cartesiaService.streamTextToSpeech(text, {
           outputFormat: {
             container: 'raw',
-            sampleRate: 16000, // 16kHz
-            encoding: 'pcm_s16le' // 16-bit PCM
+            sampleRate: 16000,
+            encoding: 'pcm_s16le'
           }
         }).catch(reject);
         
