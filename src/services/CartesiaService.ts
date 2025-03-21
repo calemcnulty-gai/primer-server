@@ -72,7 +72,7 @@ export class CartesiaService extends EventEmitter {
       const startTime = new Date();
       logger.info(`[${requestId}] Converting text to speech: "${text.substring(0, 100)}${text.length > 100 ? '...' : ''}"`);
       
-      // Create TTS request using the SDK
+      // Create TTS request using the SDK with raw PCM format to match streaming
       const audioArrayBuffer = await this.client.tts.bytes({
         modelId: this.modelId,
         transcript: text,
@@ -81,9 +81,9 @@ export class CartesiaService extends EventEmitter {
           id: this.defaultVoiceId
         },
         outputFormat: {
-          container: 'mp3',
-          sampleRate: 16000, // Match client-side expectation: 16kHz
-          bitRate: 128000
+          container: 'raw',
+          encoding: 'pcm_s16le',
+          sampleRate: 16000 // Match client-side expectation: 16kHz
         },
         language: 'en'
       });
@@ -94,9 +94,9 @@ export class CartesiaService extends EventEmitter {
       
       // Log essential audio metadata
       this.logAudioMetadata(buffer, {
-        container: 'mp3',
-        sampleRate: 16000,
-        bitRate: 128000
+        container: 'raw',
+        encoding: 'pcm_s16le',
+        sampleRate: 16000
       });
       
       logger.info(`[${requestId}] Successfully converted text to speech in ${duration}ms, audio size: ${buffer.length} bytes`);
