@@ -210,6 +210,9 @@ export class WebRTCService extends EventEmitter {
     try {
       const data = JSON.parse(message);
       
+      // Enhanced debugging for all messages
+      logger.info(`WebSocket message received from ${connectionId}: type=${data.type}, size=${message.length}`);
+      
       // Forward client messages to listeners
       this.emit('message', connectionId, data);
       
@@ -223,11 +226,20 @@ export class WebRTCService extends EventEmitter {
           this.handleICECandidate(connectionId, data);
           break;
           
+        case 'start-listening':
+          // Explicitly log start-listening commands at info level
+          logger.info(`Received start-listening command from ${connectionId} with ID: ${data.commandId || 'none'}`);
+          break;
+          
         case 'heartbeat':
         case 'ping':
           this.sendMessage(connectionId, { 
             type: data.type === 'heartbeat' ? 'heartbeat-ack' : 'pong' 
           });
+          break;
+          
+        default:
+          logger.debug(`Unhandled message type: ${data.type} from ${connectionId}`);
           break;
       }
     } catch (error) {
@@ -419,8 +431,35 @@ export class WebRTCService extends EventEmitter {
     if (!connection || connection.state === 'closed') return false;
     
     try {
+      // For specific message types, add connection status information
+      if (message.type === 'listening-started' || 
+          message.type === 'connection-established' || 
+          message.type === 'voice-session-ready') {
+        
+        // Add connection metrics to help client troubleshoot
+        const peer = connection.peer;
+        const peerConn = peer?._pc;
+        
+        // Add connection status fields
+        message.serverConnectionState = {
+          internalState: connection.state,
+          connected: connection.connected,
+          peerState: peerConn?.connectionState,
+          iceState: peerConn?.iceConnectionState,
+          signalingState: peerConn?.signalingState,
+          receivers: peerConn?.getReceivers()?.length || 0,
+          timestamp: Date.now()
+        };
+      }
+      
+      // Send the message
       connection.ws.send(JSON.stringify(message));
       connection.messagesSent++;
+      
+      if (message.type !== 'heartbeat-ack' && message.type !== 'pong') {
+        logger.debug(`Sent message type ${message.type} to ${connectionId}`);
+      }
+      
       return true;
     } catch (error) {
       logger.error(`Error sending message to ${connectionId}:`, error);
