@@ -159,7 +159,10 @@ export class WebRTCService extends EventEmitter {
    */
   private async handleWebSocketMessage(connectionId: string, message: any): Promise<void> {
     const connection = this.connections.get(connectionId);
-    if (!connection) return;
+    if (!connection) {
+      logger.error(`No connection found for ${connectionId}`);
+      return;
+    }
 
     connection.lastActivity = Date.now();
 
@@ -167,11 +170,16 @@ export class WebRTCService extends EventEmitter {
       // Ensure message is parsed if it's a string
       const data = typeof message === 'string' ? JSON.parse(message) : message;
       
-      logger.debug(`Received message type ${data.type} from ${connectionId}`);
+      logger.info(`Received message type ${data.type} from ${connectionId}`, {
+        messageType: data.type,
+        connectionState: connection.state,
+        hasTransport: !!connection.transport,
+        hasProducer: !!connection.producer
+      });
 
       switch (data.type) {
         case 'offer':
-          logger.info(`Received WebRTC offer from ${connectionId}`);
+          logger.info(`Processing WebRTC offer from ${connectionId}`);
           if (!connection.router) {
             logger.error('No router available for connection');
             return;
@@ -179,12 +187,20 @@ export class WebRTCService extends EventEmitter {
 
           // Create WebRTC transport if not exists
           if (!connection.transport) {
+            logger.info(`Creating WebRTC transport for ${connectionId}`);
             connection.transport = await connection.router.createWebRtcTransport({
               listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
               enableUdp: true,
               enableTcp: true,
               preferUdp: true,
               initialAvailableOutgoingBitrate: 800000
+            });
+
+            // Log transport creation
+            logger.info(`Transport created for ${connectionId}`, {
+              transportId: connection.transport.id,
+              iceState: connection.transport.iceConnectionState,
+              dtlsState: connection.transport.dtlsState
             });
 
             // Send transport parameters to client
@@ -205,12 +221,29 @@ export class WebRTCService extends EventEmitter {
             return;
           }
 
-          await connection.transport.connect({
-            dtlsParameters: data.dtlsParameters
-          });
+          try {
+            await connection.transport.connect({
+              dtlsParameters: data.dtlsParameters
+            });
 
-          connection.state = 'connected';
-          connection.connected = true;
+            connection.state = 'connected';
+            connection.connected = true;
+
+            logger.info(`Transport connected for ${connectionId}`, {
+              iceState: connection.transport.iceConnectionState,
+              dtlsState: connection.transport.dtlsState
+            });
+
+            // Send confirmation
+            this.sendMessage(connectionId, {
+              type: 'transport-connected'
+            });
+
+            this.emit('connection:ready', connectionId);
+          } catch (error) {
+            logger.error(`Failed to connect transport for ${connectionId}:`, error);
+            this.sendError(connectionId, 'TRANSPORT_CONNECT_ERROR', 'Failed to connect transport');
+          }
           break;
 
         case 'produce':
@@ -220,28 +253,42 @@ export class WebRTCService extends EventEmitter {
             return;
           }
 
-          const producer = await connection.transport.produce({
-            kind: 'audio',
-            rtpParameters: data.rtpParameters
-          });
+          try {
+            const producer = await connection.transport.produce({
+              kind: 'audio',
+              rtpParameters: data.rtpParameters
+            });
 
-          connection.producer = producer;
+            connection.producer = producer;
 
-          // Log audio stream metadata
-          logger.info(`Audio producer created for ${connectionId}:`, {
-            id: producer.id,
-            kind: producer.kind,
-            type: producer.type,
-            paused: producer.paused,
-            score: producer.score
-          });
+            // Log audio stream metadata
+            logger.info(`Audio producer created for ${connectionId}:`, {
+              id: producer.id,
+              kind: producer.kind,
+              type: producer.type,
+              paused: producer.paused,
+              score: producer.score
+            });
 
-          this.sendMessage(connectionId, {
-            type: 'producer-created',
-            producerId: producer.id
-          });
+            // Monitor producer stats
+            producer.observer.on('score', (score) => {
+              logger.debug(`Producer score for ${connectionId}:`, score);
+            });
 
-          this.emit('stream', connectionId, producer);
+            producer.observer.on('close', () => {
+              logger.info(`Producer closed for ${connectionId}`);
+            });
+
+            this.sendMessage(connectionId, {
+              type: 'producer-created',
+              producerId: producer.id
+            });
+
+            this.emit('stream', connectionId, producer);
+          } catch (error) {
+            logger.error(`Failed to create producer for ${connectionId}:`, error);
+            this.sendError(connectionId, 'PRODUCE_ERROR', 'Failed to create producer');
+          }
           break;
 
         case 'start-listening':
@@ -257,26 +304,15 @@ export class WebRTCService extends EventEmitter {
           });
           break;
 
-        case 'stop-listening':
-          logger.info(`Stop listening request from ${connectionId}`);
-          this.sendMessage(connectionId, {
-            type: 'listening-stopped'
-          });
-          break;
-
-        case 'ice-candidate':
-        case 'candidate':
-          logger.debug(`Received ICE candidate from ${connectionId}`);
-          // ICE candidates are handled by mediasoup transport automatically
-          break;
-
         default:
           logger.debug(`Unhandled message type: ${data.type} from ${connectionId}`);
+          // Log full message for debugging
+          logger.debug(`Full message:`, data);
           break;
       }
     } catch (error) {
       logger.error(`Error processing message from ${connectionId}:`, error);
-      this.sendError(connectionId, 'MESSAGE_ERROR', 'Failed to process message');
+      this.sendError(connectionId, 'MESSAGE_ERROR', error instanceof Error ? error.message : 'Failed to process message');
     }
   }
 
