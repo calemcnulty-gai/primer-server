@@ -3,6 +3,7 @@ import { DeepgramService, DeepgramConnection } from './DeepgramService';
 import { CartesiaService, CartesiaResponse } from './CartesiaService';
 import { WebRTCService, WebRTCMessage } from './WebRTCService';
 import { createLogger } from '../utils/logger';
+import { AudioContext } from 'node-web-audio-api';
 
 const logger = createLogger('VoiceService');
 
@@ -303,26 +304,35 @@ export class VoiceService extends EventEmitter {
         return;
       }
 
+      logger.info(`Processing audio stream for ${connectionId} with ${audioTracks.length} tracks`);
+      logger.debug(`Audio track details: kind=${audioTracks[0].kind}, id=${audioTracks[0].id}, readyState=${audioTracks[0].readyState}`);
+
       // Store the stream reference
       session.stream = stream;
 
-      // Create a live transcription connection to Deepgram
+      // Create an AudioContext to process the stream
+      const audioContext = new AudioContext({ sampleRate: 16000 }); // Match Deepgram's expected sample rate
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1); // Buffer size of 4096, mono
+
+      // Create Deepgram connection
       const deepgramConnection = this.deepgramService.createConnection({
-        model: "nova-3",
+        model: "nova-2",
         language: "en-US",
         smart_format: true,
-        interim_results: true
+        interim_results: true,
+        encoding: "linear16",
+        sampleRate: 16000,
+        channels: 1
       });
-
-      // Store the connection in the session
       session.deepgramConnection = deepgramConnection;
 
-      // Track transcription state for streaming to Cartesia
+      // Track transcription state
       let currentContext: string | null = null;
       let lastTranscript = '';
       let isFirstUtterance = true;
 
-      // Handle transcription events
+      // Handle Deepgram events
       deepgramConnection.on('open', () => {
         logger.info(`Deepgram connection opened for ${connectionId}`);
       });
@@ -333,25 +343,19 @@ export class VoiceService extends EventEmitter {
       });
 
       deepgramConnection.on('transcript', async (data) => {
-        const transcript = data.channel.alternatives[0].transcript;
+        const transcript = data.channel?.alternatives?.[0]?.transcript || '';
         const isFinal = data.is_final;
 
-        // Log the transcript with its state
         logger.info(`Transcription for ${connectionId}: "${transcript}" (${isFinal ? 'final' : 'interim'})`);
 
-        // Only process non-empty transcripts
         if (transcript.trim()) {
-          // For final transcripts, we want to stream to Cartesia
           if (isFinal) {
             try {
-              // If this is our first utterance, we send it as is
               if (isFirstUtterance) {
                 logger.info(`Sending first utterance to Cartesia: "${transcript}"`);
                 currentContext = await this.streamToCartesia(connectionId, transcript);
                 isFirstUtterance = false;
               } else {
-                // For subsequent utterances, we need to handle continuations properly
-                // Ensure proper spacing between utterances
                 const continuationText = transcript.startsWith(' ') ? transcript : ' ' + transcript;
                 logger.info(`Sending continuation to Cartesia: "${continuationText}" (context: ${currentContext})`);
                 currentContext = await this.streamToCartesia(connectionId, continuationText, currentContext);
@@ -361,7 +365,6 @@ export class VoiceService extends EventEmitter {
               logger.error(`Error streaming to Cartesia for ${connectionId}:`, error);
             }
           } else {
-            // For interim results, just log them
             logger.debug(`Interim transcript for ${connectionId}: "${transcript}"`);
           }
         }
@@ -372,12 +375,31 @@ export class VoiceService extends EventEmitter {
         currentContext = null;
       });
 
-      // Pipe the audio stream to Deepgram
-      stream.on('data', (chunk) => {
-        if (session.isListening && session.deepgramConnection) {
-          session.deepgramConnection.send(chunk);
+      // Process audio data into PCM chunks
+      processor.onaudioprocess = (event) => {
+        if (!session.isListening || !session.deepgramConnection) {
+          logger.debug(`Skipping audio processing for ${connectionId} - not listening or no Deepgram connection`);
+          return;
         }
-      });
+
+        const inputBuffer = event.inputBuffer;
+        const float32Data = inputBuffer.getChannelData(0); // Mono channel
+        const pcmData = Buffer.alloc(float32Data.length * 2); // 16-bit PCM
+
+        // Convert Float32Array (-1.0 to 1.0) to 16-bit PCM (-32768 to 32767)
+        for (let i = 0; i < float32Data.length; i++) {
+          const sample = Math.max(-1, Math.min(1, float32Data[i])) * 32767;
+          pcmData.writeInt16LE(Math.round(sample), i * 2);
+        }
+
+        logger.debug(`Sending ${pcmData.length} bytes of PCM audio to Deepgram for ${connectionId}`);
+        session.deepgramConnection.send(pcmData);
+        session.totalAudioReceived += pcmData.length;
+      };
+
+      // Connect the audio processing pipeline
+      source.connect(processor);
+      processor.connect(audioContext.destination);
 
       // Clean up when the track ends
       audioTracks[0].onended = () => {
@@ -385,12 +407,21 @@ export class VoiceService extends EventEmitter {
         if (session.deepgramConnection) {
           session.deepgramConnection.finish();
         }
+        processor.disconnect();
+        source.disconnect();
+        audioContext.close();
         session.stream = undefined;
         session.deepgramConnection = undefined;
       };
 
+      logger.info(`Audio processing pipeline established for ${connectionId}`);
     } catch (error) {
-      logger.error(`Error handling audio stream for ${connectionId}:`, error);
+      logger.error(`Error setting up audio processing for ${connectionId}:`, error);
+      if (session.deepgramConnection) {
+        session.deepgramConnection.finish();
+        session.deepgramConnection = undefined;
+      }
+      session.stream = undefined;
     }
   }
 

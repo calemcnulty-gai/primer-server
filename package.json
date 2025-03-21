@@ -36,6 +36,7 @@
     "glob": "^11.0.1",
     "node-audiorecorder": "^3.0.0",
     "node-wav": "^0.0.2",
+    "node-web-audio-api": "^1.0.4",
     "simple-peer": "^9.11.1",
     "simple-peer-server": "^0.0.10",
     "speaker": "^0.5.4",
