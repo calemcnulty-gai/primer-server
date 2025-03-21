@@ -3,7 +3,7 @@ import { DeepgramService } from './DeepgramService';
 import { CartesiaService, CartesiaResponse } from './CartesiaService';
 import { WebRTCService } from './WebRTCService';
 import { createLogger } from '../utils/logger';
-import { RTCPeerConnection, RTCRtpReceiver } from 'werift-webrtc';
+import { RTCPeerConnection } from 'werift-webrtc';
 
 const logger = createLogger('VoiceService');
 
@@ -335,7 +335,7 @@ export class VoiceService extends EventEmitter {
       // Add client stream tracks to peer connection
       audioTracks.forEach((track: any) => {
         try {
-          pc.addTransceiver(track, { direction: 'sendrecv' });
+          pc.addTrack(track);
         } catch (error) {
           logger.error(`Error adding track to peer connection: ${error}`);
         }
@@ -358,9 +358,9 @@ export class VoiceService extends EventEmitter {
       let lastTranscript = '';
       let isFirstUtterance = true;
 
-      pc.onTrack.subscribe((event) => {
+      pc.ontrack = (event) => {
         const track = event.track;
-        track.onReceiveRtp.subscribe((rtp) => {
+        track.onReceiveRtp = (rtp) => {
           const pcmData = this.decodePCMU(rtp.payload);
           if (pcmData) {
             processedChunks++;
@@ -369,8 +369,8 @@ export class VoiceService extends EventEmitter {
             session.deepgramConnection.send(pcmData);
             session.totalAudioReceived += pcmData.length;
           }
-        });
-      });
+        };
+      };
 
       deepgramConnection.on('open', () => {
         logger.info(`Deepgram opened for ${connectionId}`);
