@@ -178,16 +178,14 @@ export class WebRTCService extends EventEmitter {
       });
 
       switch (data.type) {
-        case 'offer':
-          logger.info(`Processing WebRTC offer from ${connectionId}`);
+        case 'create-transport':
+          logger.info(`Creating WebRTC transport for ${connectionId}`);
           if (!connection.router) {
-            logger.error('No router available for connection');
+            this.sendError(connectionId, 'NO_ROUTER', 'Router not initialized');
             return;
           }
 
-          // Create WebRTC transport if not exists
-          if (!connection.transport) {
-            logger.info(`Creating WebRTC transport for ${connectionId}`);
+          try {
             connection.transport = await connection.router.createWebRtcTransport({
               listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
               enableUdp: true,
@@ -196,14 +194,12 @@ export class WebRTCService extends EventEmitter {
               initialAvailableOutgoingBitrate: 800000
             });
 
-            // Log transport creation
             logger.info(`Transport created for ${connectionId}`, {
               transportId: connection.transport.id,
               iceState: connection.transport.iceState,
               dtlsState: connection.transport.dtlsState
             });
 
-            // Send transport parameters to client
             this.sendMessage(connectionId, {
               type: 'transport-created',
               transportId: connection.transport.id,
@@ -211,21 +207,25 @@ export class WebRTCService extends EventEmitter {
               iceCandidates: connection.transport.iceCandidates,
               dtlsParameters: connection.transport.dtlsParameters
             });
+          } catch (error) {
+            logger.error(`Failed to create transport for ${connectionId}:`, error);
+            this.sendError(connectionId, 'TRANSPORT_CREATE_ERROR', 'Failed to create transport');
           }
           break;
 
         case 'connect-transport':
-          logger.info(`Connecting transport for ${connectionId}`);
           if (!connection.transport) {
-            logger.error('No transport to connect');
+            this.sendError(connectionId, 'NO_TRANSPORT', 'Transport not created');
+            return;
+          }
+
+          if (!data.dtlsParameters) {
+            this.sendError(connectionId, 'INVALID_PARAMETERS', 'Missing DTLS parameters');
             return;
           }
 
           try {
-            await connection.transport.connect({
-              dtlsParameters: data.dtlsParameters
-            });
-
+            await connection.transport.connect({ dtlsParameters: data.dtlsParameters });
             connection.state = 'connected';
             connection.connected = true;
 
@@ -234,11 +234,7 @@ export class WebRTCService extends EventEmitter {
               dtlsState: connection.transport.dtlsState
             });
 
-            // Send confirmation
-            this.sendMessage(connectionId, {
-              type: 'transport-connected'
-            });
-
+            this.sendMessage(connectionId, { type: 'transport-connected' });
             this.emit('connection:ready', connectionId);
           } catch (error) {
             logger.error(`Failed to connect transport for ${connectionId}:`, error);
@@ -246,10 +242,19 @@ export class WebRTCService extends EventEmitter {
           }
           break;
 
-        case 'produce':
-          logger.info(`Setting up producer for ${connectionId}`);
+        case 'create-producer':
           if (!connection.transport) {
-            logger.error('No transport available for producing');
+            this.sendError(connectionId, 'NO_TRANSPORT', 'Transport not created');
+            return;
+          }
+
+          if (!connection.connected) {
+            this.sendError(connectionId, 'TRANSPORT_NOT_CONNECTED', 'Transport not connected');
+            return;
+          }
+
+          if (!data.rtpParameters) {
+            this.sendError(connectionId, 'INVALID_PARAMETERS', 'Missing RTP parameters');
             return;
           }
 
@@ -261,7 +266,6 @@ export class WebRTCService extends EventEmitter {
 
             connection.producer = producer;
 
-            // Log audio stream metadata
             logger.info(`Audio producer created for ${connectionId}:`, {
               id: producer.id,
               kind: producer.kind,
@@ -270,7 +274,6 @@ export class WebRTCService extends EventEmitter {
               score: producer.score
             });
 
-            // Monitor producer stats
             producer.observer.on('score', (score) => {
               logger.debug(`Producer score for ${connectionId}:`, score);
             });
@@ -292,12 +295,16 @@ export class WebRTCService extends EventEmitter {
           break;
 
         case 'start-listening':
+          if (!connection.producer) {
+            this.sendError(connectionId, 'NO_PRODUCER', 'Producer not created');
+            return;
+          }
+
           logger.info(`Start listening request from ${connectionId}`, {
             commandId: data.commandId,
             debug: data.debug
           });
           
-          // Acknowledge the start-listening command
           this.sendMessage(connectionId, {
             type: 'listening-started',
             commandId: data.commandId
@@ -306,8 +313,7 @@ export class WebRTCService extends EventEmitter {
 
         default:
           logger.debug(`Unhandled message type: ${data.type} from ${connectionId}`);
-          // Log full message for debugging
-          logger.debug(`Full message:`, data);
+          logger.debug('Full message:', data);
           break;
       }
     } catch (error) {
