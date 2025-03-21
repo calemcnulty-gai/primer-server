@@ -16,6 +16,7 @@ export interface RTCConnectionState {
   statsInterval?: NodeJS.Timeout;
   connected: boolean;      // Whether the WebRTC connection is active
   keepAliveInterval?: NodeJS.Timeout;
+  pendingCandidates?: any[];
 }
 
 export interface WebRTCMessage {
@@ -271,12 +272,24 @@ export class WebRTCService extends EventEmitter {
     try {
       connection.state = 'connecting';
       
-      // Create a new peer connection
+      // Create a new peer connection with proper configuration
       const peer = new SimplePeer({
         initiator: false,
         trickle: true,
         config: { iceServers: this.iceServers },
-        sdpTransform: (sdp) => sdp.replace('a=recvonly', 'a=sendrecv'),
+        objectMode: true, // Enable object mode for proper data handling
+        sdpTransform: (sdp) => {
+          // Ensure proper audio stream configuration
+          sdp = sdp.replace('a=recvonly', 'a=sendrecv');
+          // Add audio codec preferences
+          if (!sdp.includes('a=fmtp:111')) {
+            sdp = sdp.replace('a=rtpmap:111 opus/48000/2\r\n',
+              'a=rtpmap:111 opus/48000/2\r\n' +
+              'a=fmtp:111 minptime=10;useinbandfec=1;stereo=1\r\n');
+          }
+          return sdp;
+        },
+        streams: [], // Initialize with empty streams array
         wrtc: require('wrtc')
       });
       
@@ -392,22 +405,44 @@ export class WebRTCService extends EventEmitter {
    */
   private handleICECandidate(connectionId: string, data: any): void {
     const connection = this.connections.get(connectionId);
-    if (!connection || !connection.peer) return;
+    if (!connection) return;
     
     try {
+      // Check if we have a valid peer and it's not destroyed
+      if (!connection.peer || connection.peer.destroyed) {
+        logger.warn(`Cannot process ICE candidate for ${connectionId}: peer is ${!connection.peer ? 'missing' : 'destroyed'}`);
+        
+        // If peer is destroyed but we're still getting candidates, attempt recovery
+        if (connection.state !== 'closed') {
+          logger.info(`Attempting to recover connection for ${connectionId}`);
+          // Store the candidate for later if we get a new offer
+          if (!connection.pendingCandidates) {
+            connection.pendingCandidates = [];
+          }
+          connection.pendingCandidates.push(data);
+          
+          // Request a new offer from client
+          this.sendMessage(connectionId, { 
+            type: 'connection-retry-needed',
+            message: 'WebRTC connection failed, please send a new offer'
+          });
+        }
+        return;
+      }
+      
       // Log ICE candidate for debugging (safely check type)
       if (data.candidate && typeof data.candidate === 'string') {
         logger.debug(`Processing ICE candidate for ${connectionId}: ${data.candidate.substring(0, 50)}...`);
-      } else if (data.candidate) {
-        logger.debug(`Processing ICE candidate for ${connectionId}: [non-string format]`);
       }
       
       // Signal the peer with the ICE candidate
       connection.peer.signal(data);
       
-      // Check if ice connection state has changed and might now be connected
+      // Check connection state after a delay
       setTimeout(() => {
-        const peerConn = connection.peer?._pc;
+        if (!connection.peer || connection.peer.destroyed) return;
+        
+        const peerConn = connection.peer._pc;
         if (peerConn && 
            (peerConn.iceConnectionState === 'connected' || peerConn.iceConnectionState === 'completed') && 
            !connection.connected) {
@@ -416,13 +451,31 @@ export class WebRTCService extends EventEmitter {
           connection.connected = true;
           connection.state = 'connected';
           
+          // Process any pending candidates if we recovered
+          if (connection.pendingCandidates?.length > 0) {
+            logger.info(`Processing ${connection.pendingCandidates.length} pending candidates for ${connectionId}`);
+            connection.pendingCandidates.forEach(candidate => {
+              try {
+                connection.peer.signal(candidate);
+              } catch (err) {
+                logger.warn(`Failed to process pending candidate: ${err.message}`);
+              }
+            });
+            delete connection.pendingCandidates;
+          }
+          
           // Emit connection:ready if not already done
           this.emit('connection:ready', connectionId);
         }
-      }, 500); // Small delay to allow the state to update
+      }, 500);
       
     } catch (error) {
       logger.error(`Failed to process ICE candidate from ${connectionId}:`, error);
+      
+      // Only attempt recovery for non-fatal errors
+      if (error.code !== 'ERR_DESTROYED' && connection.state !== 'closed') {
+        logger.info(`Will attempt recovery for ${connectionId} on next offer`);
+      }
     }
   }
   
