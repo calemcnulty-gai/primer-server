@@ -126,7 +126,24 @@ export class VoiceService extends EventEmitter {
     
     switch (message.type) {
       case 'start-listening':
+        // Debug logging for start-listening command
+        console.log('[DEBUG] Received start-listening command:', {
+          commandId: message.commandId, 
+          connectionId: message.connectionId,
+          clientDebugInfo: message.debug 
+        });
+        
         this.startListening(connectionId);
+        
+        // Debug logging for WebRTC state after start-listening
+        const peerConnection = this.webrtcService.getPeerConnection(connectionId);
+        console.log('[DEBUG] WebRTC state on server after start-listening:', {
+          connectionId: connectionId, 
+          webrtcConnected: this.webrtcService.isConnected(connectionId),
+          peerConnectionState: peerConnection?.connectionState || 'unknown',
+          iceConnectionState: peerConnection?.iceConnectionState || 'unknown',
+          audioTracks: peerConnection?.getReceivers().filter(r => r.track?.kind === 'audio').length || 0
+        });
         break;
         
       case 'stop-listening':
@@ -148,6 +165,13 @@ export class VoiceService extends EventEmitter {
     // Update stats
     session.totalAudioReceived += audioChunk.length;
     session.audioBuffer.push(audioChunk);
+    
+    // Debug logging for audio data reception
+    console.log('[DEBUG] Server received audio data:', {
+      connectionId: connectionId,
+      bytesReceived: audioChunk.length,
+      timestamp: Date.now()
+    });
     
     logger.debug(`Received ${audioChunk.length} bytes of audio over WebRTC from ${connectionId}`);
     

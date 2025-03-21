@@ -177,6 +177,14 @@ export class WebRTCService extends EventEmitter {
   }
   
   /**
+   * Get the peer connection object for debugging
+   */
+  public getPeerConnection(connectionId: string): any {
+    const connection = this.connections.get(connectionId);
+    return connection?.peer?._pc || null;
+  }
+  
+  /**
    * Handle WebSocket messages (signaling only)
    */
   private handleWebSocketMessage(connectionId: string, message: string): void {
