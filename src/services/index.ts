@@ -4,7 +4,7 @@ import { DeepgramService } from './DeepgramService';
 import { GeminiService } from './GeminiService';
 import { CartesiaService } from './CartesiaService';
 import { createLogger } from '../utils/logger';
-import { generateRandomId } from '../utils/utils';
+import { v4 as uuidv4 } from 'uuid';
 
 const logger = createLogger('Services');
 
@@ -50,7 +50,7 @@ export function setupWebSocketServer(server: any, services: Services, path: stri
   // Handle new connections
   wss.on('connection', (ws: any, req: any) => {
     // Generate unique connection ID
-    const connectionId = generateRandomId();
+    const connectionId = uuidv4();
     
     logger.info(`New WebSocket connection: ${connectionId} on path ${path}`);
     

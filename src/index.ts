@@ -24,6 +24,9 @@ import { attachDeviceId } from './middleware/deviceId';
 import { VoiceController } from './controllers/voiceController';
 import { LogLevel, setServiceLogLevel, setGlobalLogLevel, createLogger } from './utils/logger';
 import { initializeServices, setupWebSocketServer } from './services';
+import { WebSocket } from 'ws';
+import { IncomingMessage } from 'http';
+import { v4 as uuidv4 } from 'uuid';
 
 const logger = createLogger('Server');
 
