@@ -4,6 +4,7 @@ import { DeepgramService } from './DeepgramService';
 import { GeminiService } from './GeminiService';
 import { CartesiaService } from './CartesiaService';
 import { createLogger } from '../utils/logger';
+import { generateRandomId } from '../utils/utils';
 
 const logger = createLogger('Services');
 
@@ -30,28 +31,36 @@ export function initializeServices() {
   };
 }
 
-// Example integration with a WebSocket server
-export function setupWebSocketServer(wss: any, services: ReturnType<typeof initializeServices>) {
+// Type definition for the services object
+export type Services = ReturnType<typeof initializeServices>;
+
+/**
+ * Set up WebSocket server with the services
+ */
+export function setupWebSocketServer(server: any, services: Services, path: string = '/api/v1/voice') {
+  // Create WebSocket server
+  const WebSocket = require('ws');
+  const wss = new WebSocket.Server({ 
+    server,
+    path
+  });
+  
   const { webrtc } = services;
   
+  // Handle new connections
   wss.on('connection', (ws: any, req: any) => {
     // Generate unique connection ID
-    const connectionId = generateConnectionId();
+    const connectionId = generateRandomId();
     
-    logger.info(`New WebSocket connection: ${connectionId}`);
+    logger.info(`New WebSocket connection: ${connectionId} on path ${path}`);
     
     // Pass connection to WebRTC service for handling
     webrtc.handleNewConnection(connectionId, ws);
   });
   
-  logger.info('WebSocket server configured to use WebRTC and Voice services');
-}
-
-/**
- * Generate a unique connection ID
- */
-function generateConnectionId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).substring(2, 5);
+  logger.info(`WebSocket server configured on path ${path}`);
+  
+  return wss;
 }
 
 // Export all services directly

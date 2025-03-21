@@ -1,10 +1,12 @@
 import { Request, Response } from 'express';
 import { VoiceController } from '../voiceController';
 import { VoiceService } from '../../services/VoiceService';
+import { WebRTCService } from '../../services/WebRTCService';
 
 describe('VoiceController', () => {
   let voiceController: VoiceController;
-  let voiceService: VoiceService;
+  let voiceService: jest.Mocked<VoiceService>;
+  let webrtcService: jest.Mocked<WebRTCService>;
   let mockRequest: Partial<Request>;
   let mockResponse: Partial<Response>;
   let responseJson: jest.Mock;
@@ -17,18 +19,20 @@ describe('VoiceController', () => {
       json: responseJson,
     };
 
-    // Create a mock voice service
-    voiceService = new VoiceService();
+    // Create mock services
+    voiceService = {
+      getStatus: jest.fn().mockReturnValue('running'),
+    } as unknown as jest.Mocked<VoiceService>;
     
-    // Mock the service methods
-    jest.spyOn(voiceService, 'getStatus').mockReturnValue('running');
-    jest.spyOn(voiceService, 'getRTCConfig').mockReturnValue({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    });
-    jest.spyOn(voiceService, 'handleNewConnection').mockImplementation(() => {});
+    webrtcService = {
+      getRTCConfig: jest.fn().mockReturnValue({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      }),
+      handleNewConnection: jest.fn(),
+    } as unknown as jest.Mocked<WebRTCService>;
 
-    // Create the controller with the mock service
-    voiceController = new VoiceController(voiceService);
+    // Create the controller with the mock services
+    voiceController = new VoiceController(voiceService, webrtcService);
   });
 
   describe('getStatus', () => {
@@ -53,7 +57,7 @@ describe('VoiceController', () => {
       voiceController.getConfig(mockRequest as Request, mockResponse as Response);
 
       // Verify the service method was called
-      expect(voiceService.getRTCConfig).toHaveBeenCalled();
+      expect(webrtcService.getRTCConfig).toHaveBeenCalled();
 
       // Verify the response was sent
       expect(responseJson).toHaveBeenCalledWith({
@@ -72,7 +76,7 @@ describe('VoiceController', () => {
       voiceController.handleWebSocketConnection(connectionId, mockWs);
 
       // Verify the service method was called with the connection ID and WebSocket
-      expect(voiceService.handleNewConnection).toHaveBeenCalledWith(connectionId, mockWs);
+      expect(webrtcService.handleNewConnection).toHaveBeenCalledWith(connectionId, mockWs);
     });
   });
 });

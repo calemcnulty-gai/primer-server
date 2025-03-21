@@ -1,30 +1,25 @@
 import { DeepgramService } from '../DeepgramService';
-import { GeminiService } from '../GeminiService';
 import { CartesiaService } from '../CartesiaService';
 
 // Mock the dependencies
 jest.mock('../DeepgramService');
-jest.mock('../GeminiService');
 jest.mock('../CartesiaService');
 
 describe('Voice Echo Pipeline', () => {
   let deepgramService: jest.Mocked<DeepgramService>;
-  let geminiService: jest.Mocked<GeminiService>;
   let cartesiaService: jest.Mocked<CartesiaService>;
   
   beforeEach(() => {
     // Create mock instances
     deepgramService = new DeepgramService() as jest.Mocked<DeepgramService>;
-    geminiService = new GeminiService() as jest.Mocked<GeminiService>;
     cartesiaService = new CartesiaService() as jest.Mocked<CartesiaService>;
     
     // Set up mock implementations
     deepgramService.transcribeAudio.mockResolvedValue('Hello, testing voice API');
-    geminiService.processText.mockResolvedValue('I heard you say: Hello, testing voice API');
     cartesiaService.textToSpeech.mockResolvedValue(Buffer.from('mock audio data'));
   });
   
-  it('should process audio through the full pipeline', async () => {
+  it('should process audio through the echo pipeline', async () => {
     // Sample audio data
     const audioData = Buffer.from('mock audio data');
     
@@ -33,14 +28,13 @@ describe('Voice Echo Pipeline', () => {
     expect(deepgramService.transcribeAudio).toHaveBeenCalledWith(audioData);
     expect(transcribedText).toBe('Hello, testing voice API');
     
-    // Step 2: Process with LLM
-    const llmResponse = await geminiService.processText(transcribedText);
-    expect(geminiService.processText).toHaveBeenCalledWith('Hello, testing voice API');
-    expect(llmResponse).toBe('I heard you say: Hello, testing voice API');
+    // Step 2: Create echo response
+    const echoResponse = `You said: ${transcribedText}`;
+    expect(echoResponse).toBe('You said: Hello, testing voice API');
     
     // Step 3: Convert to speech
-    const audioResponse = await cartesiaService.textToSpeech(llmResponse);
-    expect(cartesiaService.textToSpeech).toHaveBeenCalledWith('I heard you say: Hello, testing voice API');
+    const audioResponse = await cartesiaService.textToSpeech(echoResponse);
+    expect(cartesiaService.textToSpeech).toHaveBeenCalledWith('You said: Hello, testing voice API');
     expect(audioResponse).toEqual(Buffer.from('mock audio data'));
     
     // The complete pipeline should work end-to-end
@@ -56,14 +50,6 @@ describe('Voice Echo Pipeline', () => {
     
     // The transcription should fail
     await expect(deepgramService.transcribeAudio(audioData)).rejects.toThrow('Transcription failed');
-  });
-  
-  it('should handle errors in the LLM step', async () => {
-    // Set up the mock to throw an error
-    geminiService.processText.mockRejectedValue(new Error('LLM processing failed'));
-    
-    // The LLM processing should fail
-    await expect(geminiService.processText('Hello')).rejects.toThrow('LLM processing failed');
   });
   
   it('should handle errors in the text-to-speech step', async () => {

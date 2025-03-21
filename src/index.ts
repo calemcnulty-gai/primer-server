@@ -14,7 +14,6 @@ import { corsMiddleware, corsErrorHandler } from './middleware/cors';
 import { loggingMiddleware } from './middleware/logging';
 import { responseFormatter } from './middleware/responseFormatter';
 import { setupSwaggerMiddleware } from './middleware/swagger.middleware';
-import { setupVoiceWebSocket } from './middleware/websocket.middleware';
 import { validateApiKeys } from './config/services';
 import { createBaseRouter } from './routes/baseRouter';
 import { healthRouter } from './routes/health.routes';
@@ -23,8 +22,11 @@ import { initMonitoringRoutes } from './routes/monitoring.routes';
 import { initVoiceRoutes } from './routes/voice.routes';
 import { attachDeviceId } from './middleware/deviceId';
 import { VoiceController } from './controllers/voiceController';
-import { VoiceService } from './services/VoiceService';
 import { LogLevel, setServiceLogLevel, setGlobalLogLevel } from './utils/logger';
+import { initializeServices, setupWebSocketServer } from './services';
+import { WebSocket, IncomingMessage } from 'ws';
+import { generateRandomId } from './utils/utils';
+import { logger } from './utils/logger';
 
 // Configure logging levels
 if (process.env.NODE_ENV !== 'test') {
@@ -87,9 +89,11 @@ v1Router.use('/story', initStoryRoutes(apiKey));
 // Mount monitoring routes
 v1Router.use('/monitoring', initMonitoringRoutes());
 
-// Initialize voice service and controller
-const voiceService = new VoiceService();
-const voiceController = new VoiceController(voiceService);
+// Initialize all services
+const services = initializeServices();
+
+// Initialize voice controller with the new service
+const voiceController = new VoiceController(services.voice, services.webrtc);
 
 // Mount voice routes
 v1Router.use('/voice', initVoiceRoutes(voiceController));
@@ -105,8 +109,12 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
   errorHandler(err, req, res, next);
 });
 
-// Set up WebSocket for voice API - moved outside createServer to ensure it's always initialized
-setupVoiceWebSocket(server, voiceController, '/api/v1/voice');
+// Set up WebSocket with the WebRTC service
+setupWebSocketServer(server, services);
+
+// Export services for access from controllers
+export const voiceService = services.voice;
+export const webrtcService = services.webrtc;
 
 // Create server function for better testability
 export const createServer = (port: number = Number(process.env.PORT) || 3000) => {

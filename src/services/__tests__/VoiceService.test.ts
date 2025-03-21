@@ -1,18 +1,22 @@
 import { VoiceService } from '../VoiceService';
+import { WebRTCService } from '../WebRTCService'; 
 
 describe('VoiceService', () => {
   let voiceService: VoiceService;
-  let mockWs: any;
+  let webrtcService: WebRTCService;
 
   beforeEach(() => {
-    // Create a new voice service instance
-    voiceService = new VoiceService();
+    // Create a mock WebRTC service
+    webrtcService = {
+      on: jest.fn(),
+      isConnected: jest.fn().mockReturnValue(true),
+      sendMessage: jest.fn(),
+      sendData: jest.fn().mockReturnValue(true),
+      sendError: jest.fn()
+    } as unknown as WebRTCService;
 
-    // Create a mock WebSocket
-    mockWs = {
-      send: jest.fn(),
-      on: jest.fn()
-    };
+    // Create a new voice service instance with the mock WebRTC service
+    voiceService = new VoiceService(webrtcService);
   });
 
   describe('getStatus', () => {
@@ -28,42 +32,61 @@ describe('VoiceService', () => {
     });
   });
 
-  describe('getRTCConfig', () => {
-    it('should return the WebRTC configuration', () => {
-      // Mock the private iceServers property
-      (voiceService as any).iceServers = [
-        { urls: 'stun:stun.example.com:19302' }
-      ];
+  describe('createSession', () => {
+    it('should create a new audio session', () => {
+      // Call the private method directly
+      (voiceService as any).createSession('test-connection');
 
-      // Call the method
-      const config = voiceService.getRTCConfig();
-
-      // Verify the result
-      expect(config).toEqual({
-        iceServers: [{ urls: 'stun:stun.example.com:19302' }]
-      });
+      // Verify the session was created
+      expect((voiceService as any).sessions.has('test-connection')).toBe(true);
+      
+      const session = (voiceService as any).sessions.get('test-connection');
+      expect(session.connectionId).toBe('test-connection');
+      expect(session.isListening).toBe(false);
+      expect(session.audioBuffer).toEqual([]);
+      expect(session.totalAudioReceived).toBe(0);
     });
   });
 
-  describe('handleNewConnection', () => {
-    it('should set up a new connection', () => {
-      // Call the method
-      voiceService.handleNewConnection('test-connection', mockWs);
-
-      // Verify the WebSocket event handlers were set up
-      expect(mockWs.on).toHaveBeenCalledTimes(3);
-      expect(mockWs.on).toHaveBeenCalledWith('message', expect.any(Function));
-      expect(mockWs.on).toHaveBeenCalledWith('close', expect.any(Function));
-      expect(mockWs.on).toHaveBeenCalledWith('error', expect.any(Function));
-
-      // Verify the connection was stored
-      expect((voiceService as any).connections.has('test-connection')).toBe(true);
+  describe('startListening', () => {
+    it('should start listening to audio', () => {
+      // Create a session first
+      (voiceService as any).createSession('test-connection');
       
-      const connection = (voiceService as any).connections.get('test-connection');
-      expect(connection.ws).toBe(mockWs);
-      expect(connection.state).toBe('new');
-      expect(connection.isListening).toBe(false);
-      expect(connection.lastActivity).toBeGreaterThan(0);
+      // Call the method
+      voiceService.startListening('test-connection');
+      
+      // Verify the session was updated
+      const session = (voiceService as any).sessions.get('test-connection');
+      expect(session.isListening).toBe(true);
+      
+      // Verify WebRTC message was sent
+      expect(webrtcService.sendMessage).toHaveBeenCalledWith(
+        'test-connection', 
+        { type: 'listening-started' }
+      );
+    });
+    
+    it('should not start if WebRTC is not connected', () => {
+      // Mock WebRTC as disconnected
+      (webrtcService.isConnected as jest.Mock).mockReturnValueOnce(false);
+      
+      // Create a session first
+      (voiceService as any).createSession('test-connection');
+      
+      // Call the method
+      voiceService.startListening('test-connection');
+      
+      // Verify the session was not updated
+      const session = (voiceService as any).sessions.get('test-connection');
+      expect(session.isListening).toBe(false);
+      
+      // Verify error was sent
+      expect(webrtcService.sendError).toHaveBeenCalledWith(
+        'test-connection',
+        'WEBRTC_NOT_CONNECTED',
+        expect.any(String)
+      );
     });
   });
 });

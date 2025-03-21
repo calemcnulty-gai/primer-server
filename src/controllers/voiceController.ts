@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { VoiceService } from '../services/VoiceService';
+import { WebRTCService } from '../services/WebRTCService';
 
 export interface VoiceControllerInterface {
   getStatus: (req: Request, res: Response) => void;
@@ -9,9 +10,19 @@ export interface VoiceControllerInterface {
 
 export class VoiceController implements VoiceControllerInterface {
   private voiceService: VoiceService;
+  private webrtcService: WebRTCService;
 
-  constructor(voiceService: VoiceService) {
+  constructor(voiceService: VoiceService, webrtcService?: WebRTCService) {
     this.voiceService = voiceService;
+    
+    // Get the WebRTC service either from the parameter or from the import
+    // This ensures backward compatibility
+    this.webrtcService = webrtcService || (voiceService as any).webrtcService;
+    
+    if (!this.webrtcService) {
+      throw new Error('WebRTCService is required but not available');
+    }
+    
     this.getStatus = this.getStatus.bind(this);
     this.getConfig = this.getConfig.bind(this);
     this.handleWebSocketConnection = this.handleWebSocketConnection.bind(this);
@@ -29,7 +40,7 @@ export class VoiceController implements VoiceControllerInterface {
    * Get WebRTC connection configuration
    */
   public getConfig(req: Request, res: Response): void {
-    const config = this.voiceService.getRTCConfig();
+    const config = this.webrtcService.getRTCConfig();
     res.json(config);
   }
 
@@ -37,6 +48,6 @@ export class VoiceController implements VoiceControllerInterface {
    * Handle a new WebSocket connection for voice
    */
   public handleWebSocketConnection(connectionId: string, ws: any): void {
-    this.voiceService.handleNewConnection(connectionId, ws);
+    this.webrtcService.handleNewConnection(connectionId, ws);
   }
 }
