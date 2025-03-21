@@ -326,9 +326,11 @@ export class WebRTCService extends EventEmitter {
     if (!connection || !connection.peer) return;
     
     try {
-      // Log ICE candidate for debugging
-      if (data.candidate) {
+      // Log ICE candidate for debugging (safely check type)
+      if (data.candidate && typeof data.candidate === 'string') {
         logger.debug(`Processing ICE candidate for ${connectionId}: ${data.candidate.substring(0, 50)}...`);
+      } else if (data.candidate) {
+        logger.debug(`Processing ICE candidate for ${connectionId}: [non-string format]`);
       }
       
       // Signal the peer with the ICE candidate
