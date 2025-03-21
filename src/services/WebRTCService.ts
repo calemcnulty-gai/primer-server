@@ -9,6 +9,7 @@ export interface RTCConnectionState {
   id: string;
   ws: any;  // WebSocket connection for signaling
   transport?: mediasoup.types.WebRtcTransport;
+  transportConnected: boolean;  // Track if transport is connected
   producer?: mediasoup.types.Producer;
   router?: mediasoup.types.Router;
   state: 'new' | 'connecting' | 'connected' | 'failed' | 'closed';
@@ -112,7 +113,8 @@ export class WebRTCService extends EventEmitter {
         router,
         state: 'new',
         lastActivity: Date.now(),
-        connected: false
+        connected: false,
+        transportConnected: false
       };
 
       this.connections.set(connectionId, connection);
@@ -215,6 +217,13 @@ export class WebRTCService extends EventEmitter {
           }
 
           try {
+            // If there's an existing transport, close it first
+            if (connection.transport) {
+              logger.info(`Closing existing transport for ${connectionId}`);
+              connection.transport.close();
+              connection.transportConnected = false;
+            }
+
             connection.transport = await connection.router.createWebRtcTransport({
               listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
               enableUdp: true,
@@ -248,6 +257,13 @@ export class WebRTCService extends EventEmitter {
             return;
           }
 
+          if (connection.transportConnected) {
+            logger.info(`Transport already connected for ${connectionId}, ignoring duplicate connect request`);
+            // Send success response to avoid client retries
+            this.sendMessage(connectionId, { type: 'transport-connected' });
+            return;
+          }
+
           if (!data.dtlsParameters) {
             this.sendError(connectionId, 'INVALID_PARAMETERS', 'Missing DTLS parameters');
             return;
@@ -257,6 +273,7 @@ export class WebRTCService extends EventEmitter {
             await connection.transport.connect({ dtlsParameters: data.dtlsParameters });
             connection.state = 'connected';
             connection.connected = true;
+            connection.transportConnected = true;
 
             logger.info(`Transport connected for ${connectionId}`, {
               iceState: connection.transport.iceState,
@@ -266,8 +283,16 @@ export class WebRTCService extends EventEmitter {
             this.sendMessage(connectionId, { type: 'transport-connected' });
             this.emit('connection:ready', connectionId);
           } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Failed to connect transport';
             logger.error(`Failed to connect transport for ${connectionId}:`, error);
-            this.sendError(connectionId, 'TRANSPORT_CONNECT_ERROR', 'Failed to connect transport');
+            
+            // If the error is because transport is already connected, treat it as success
+            if (errorMessage.includes('connect() already called')) {
+              connection.transportConnected = true;
+              this.sendMessage(connectionId, { type: 'transport-connected' });
+            } else {
+              this.sendError(connectionId, 'TRANSPORT_CONNECT_ERROR', errorMessage);
+            }
           }
           break;
 
