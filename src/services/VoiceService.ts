@@ -167,7 +167,7 @@ export class VoiceService extends EventEmitter {
     switch (message.type) {
       case 'start-listening':
         // Debug logging for start-listening command
-        console.log('[DEBUG] Received start-listening command:', {
+        logger.debug('Start-listening command details:', {
           commandId: message.commandId, 
           connectionId: message.connectionId || connectionId,
           clientDebugInfo: message.debug 
@@ -178,28 +178,51 @@ export class VoiceService extends EventEmitter {
         // Store the command ID for response tracking
         const commandId = message.commandId || Date.now().toString(36);
         
-        // Start listening and get the result
-        const started = this.startListening(connectionId);
-        
-        // Always send a response, even if we couldn't start listening
-        if (!started) {
-          logger.warn(`Failed to start listening for ${connectionId}, but sending acknowledgment anyway`);
-          // Send listening-started even on failure to maintain client state consistency
+        // Validate WebRTC state before starting
+        const peerConnection = this.webrtcService.getPeerConnection(connectionId);
+        if (!peerConnection || peerConnection.connectionState !== 'connected') {
+          logger.error(`Cannot start listening - WebRTC not connected for ${connectionId}`);
           this.webrtcService.sendMessage(connectionId, { 
             type: 'listening-started',
             commandId: commandId,
-            error: 'Unable to start listening but acknowledging command'
+            error: 'WebRTC connection not ready'
+          });
+          return;
+        }
+        
+        // Check if already listening
+        if (session.isListening) {
+          logger.warn(`Session ${connectionId} is already listening, resetting state`);
+          this.stopListening(connectionId);
+        }
+        
+        // Start listening and get the result
+        const started = this.startListening(connectionId);
+        
+        // Only send success if we actually started listening
+        if (started) {
+          logger.info(`Successfully started listening for ${connectionId}`);
+          this.webrtcService.sendMessage(connectionId, { 
+            type: 'listening-started',
+            commandId: commandId
+          });
+        } else {
+          logger.error(`Failed to start listening for ${connectionId}`);
+          this.webrtcService.sendMessage(connectionId, { 
+            type: 'listening-started',
+            commandId: commandId,
+            error: 'Failed to start listening'
           });
         }
         
         // Debug logging for WebRTC state after start-listening
-        const peerConnection = this.webrtcService.getPeerConnection(connectionId);
-        console.log('[DEBUG] WebRTC state on server after start-listening:', {
+        logger.debug('WebRTC state after start-listening:', {
           connectionId: connectionId, 
           webrtcConnected: this.webrtcService.isConnected(connectionId),
           peerConnectionState: peerConnection?.connectionState || 'unknown',
           iceConnectionState: peerConnection?.iceConnectionState || 'unknown',
-          audioTracks: peerConnection?.getReceivers().filter(r => r.track?.kind === 'audio').length || 0
+          audioTracks: peerConnection?.getReceivers().filter(r => r.track?.kind === 'audio').length || 0,
+          sessionListening: session.isListening
         });
         break;
         
@@ -223,40 +246,42 @@ export class VoiceService extends EventEmitter {
       return;
     }
     
+    // Enhanced session state and audio data logging
+    logger.debug(`Audio data received: connectionId=${connectionId}, size=${audioChunk.length} bytes, isListening=${session.isListening}, totalReceived=${session.totalAudioReceived}, bufferChunks=${session.audioBuffer.length}`);
+    
     if (!session.isListening) {
       // This is common as audio might still flow, but we're not processing it
       logger.debug(`Ignoring audio data from ${connectionId} - not in listening mode`);
       return;
     }
     
-    // Skip very small chunks (likely heartbeats or control messages)
+    // Skip very small chunks (likely control data)
     if (audioChunk.length < 2) {
-      // This is likely a keep-alive ping (0-byte packet), silently handle it
+      return; // Silently ignore control packets
+    }
+    
+    // Validate audio chunk size (typical Opus frame sizes are 120-960 bytes)
+    if (audioChunk.length < 50 || audioChunk.length > 4000) {
+      logger.debug(`Unusual audio chunk size from ${connectionId}: ${audioChunk.length} bytes`);
       return;
     }
     
-    if (audioChunk.length < 50) {
-      logger.debug(`Small audio packet received, likely control data: ${audioChunk.length} bytes`);
-      return;
-    }
-    
-    // Update stats
+    // Update stats and buffer the audio
     session.totalAudioReceived += audioChunk.length;
     session.audioBuffer.push(audioChunk);
     
-    // Track audio reception for debugging
-    if (session.totalAudioReceived % 2000 === 0) { // Lower milestone threshold
-      logger.info(`Audio reception milestone: ${session.totalAudioReceived} total bytes from ${connectionId}`);
+    // Track audio reception milestones
+    if (session.totalAudioReceived % 2000 === 0) {
+      logger.info(`Audio milestone for ${connectionId}: received=${session.totalAudioReceived} bytes, chunks=${session.audioBuffer.length}`);
     }
     
-    // Debug logging for audio data reception
-    logger.debug(`Server received audio data: connectionId=${connectionId}, bytes=${audioChunk.length}, total=${session.totalAudioReceived}, chunks=${session.audioBuffer.length}`);
-    
-    // Process audio when we've collected enough data (4KB - lowered from 8KB)
+    // Process audio when we've collected enough data (lowered threshold for faster response)
     const totalSize = session.audioBuffer.reduce((sum, buffer) => sum + buffer.length, 0);
-    if (totalSize > 4000) {
-      logger.info(`Collected ${totalSize} bytes of audio (${session.audioBuffer.length} chunks), processing for ${connectionId}`);
-      this.processAudio(connectionId);
+    if (totalSize >= 4000) { // ~250ms of audio at 16kHz/16-bit
+      logger.info(`Processing audio buffer: size=${totalSize} bytes, chunks=${session.audioBuffer.length}, connectionId=${connectionId}`);
+      this.processAudio(connectionId).catch(error => {
+        logger.error(`Failed to process audio for ${connectionId}:`, error);
+      });
     }
   }
 
@@ -271,6 +296,9 @@ export class VoiceService extends EventEmitter {
       this.webrtcService.sendError(connectionId, 'NO_SESSION', 'No voice session exists');
       return false;
     }
+    
+    // Log current session state
+    logger.info(`Starting to listen for ${connectionId}, current state: isListening=${session.isListening}`);
     
     if (session.isListening) {
       logger.info(`Already listening to ${connectionId}, sending confirmation`);
@@ -300,8 +328,6 @@ export class VoiceService extends EventEmitter {
     
     if (!hasValidConnectionState) {
       logger.warn(`Cannot start listening for ${connectionId}: No valid WebRTC connection state (peer=${peerState}, ice=${iceState})`);
-      
-      // Send error to client
       this.webrtcService.sendError(connectionId, 'WEBRTC_NOT_CONNECTED', 'WebRTC connection required for audio streaming');
       return false;
     }
@@ -309,21 +335,22 @@ export class VoiceService extends EventEmitter {
     // Reset audio buffer and start listening
     session.audioBuffer = [];
     session.isListening = true;
+    session.totalAudioReceived = 0;
     
-    logger.info(`Started listening to ${connectionId}`);
+    logger.info(`Started listening to ${connectionId} (isListening=${session.isListening})`);
     
-    // IMPORTANT: Send confirmation that we've started listening
+    // Send confirmation that we've started listening, but don't reset state if it fails
     const success = this.webrtcService.sendMessage(connectionId, { 
       type: 'listening-started',
       timestamp: Date.now()
     });
     
     if (!success) {
-      logger.error(`Failed to send listening-started message to ${connectionId}`);
-      session.isListening = false; // Reset state on failure
-      return false;
+      logger.error(`Failed to send listening-started message to ${connectionId}, but continuing to listen`);
+      // Don't reset isListening - we want to keep listening even if confirmation fails
     }
     
+    // Return true since we successfully started listening, even if confirmation failed
     return true;
   }
 

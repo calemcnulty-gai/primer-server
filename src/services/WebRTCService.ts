@@ -281,7 +281,7 @@ export class WebRTCService extends EventEmitter {
         sdpTransform: (sdp) => {
           // Ensure proper audio stream configuration
           sdp = sdp.replace('a=recvonly', 'a=sendrecv');
-          // Add audio codec preferences
+          // Add audio codec preferences for Opus
           if (!sdp.includes('a=fmtp:111')) {
             sdp = sdp.replace('a=rtpmap:111 opus/48000/2\r\n',
               'a=rtpmap:111 opus/48000/2\r\n' +
@@ -289,11 +289,56 @@ export class WebRTCService extends EventEmitter {
           }
           return sdp;
         },
-        streams: [], // Initialize with empty streams array
         wrtc: require('wrtc')
       });
       
       connection.peer = peer;
+
+      // Handle incoming audio tracks
+      peer.on('track', (track, stream) => {
+        logger.info(`Received audio track for ${connectionId}: kind=${track.kind}, id=${track.id}`);
+        
+        if (track.kind === 'audio') {
+          // Set up track event handlers
+          track.ondata = (chunk: Buffer) => {
+            if (!connection.connected) return; // Skip if not connected
+            
+            logger.debug(`Received audio chunk: size=${chunk.length} bytes, connectionId=${connectionId}`);
+            this.emit('data', connectionId, chunk);
+          };
+
+          track.onended = () => {
+            logger.info(`Audio track ended for ${connectionId}`);
+          };
+
+          track.onerror = (error) => {
+            logger.error(`Audio track error for ${connectionId}:`, error);
+          };
+
+          // Log track capabilities
+          const capabilities = track.getCapabilities?.();
+          if (capabilities) {
+            logger.info(`Audio track capabilities for ${connectionId}:`, capabilities);
+          }
+        }
+      });
+
+      // Handle incoming media streams
+      peer.on('stream', (stream) => {
+        const audioTracks = stream.getAudioTracks();
+        logger.info(`Received media stream for ${connectionId}: ${audioTracks.length} audio tracks`);
+        
+        // Log stream details
+        audioTracks.forEach((track, index) => {
+          logger.info(`Audio track ${index + 1}/${audioTracks.length} for ${connectionId}:`, {
+            id: track.id,
+            kind: track.kind,
+            enabled: track.enabled,
+            muted: track.muted,
+            readyState: track.readyState
+          });
+        });
+      });
       
       // Set up peer event handlers
       peer.on('signal', (signalData: any) => {
@@ -316,7 +361,6 @@ export class WebRTCService extends EventEmitter {
         // Track connection state inconsistency but don't try to modify read-only property
         if (!peer.connected) {
           logger.warn(`Peer.connected is false for ${connectionId} despite connect event, tracking in our internal state only`);
-          // We can't modify peer.connected as it's read-only
         }
         
         // Set up keep-alive pings to maintain WebRTC connection
@@ -327,20 +371,6 @@ export class WebRTCService extends EventEmitter {
               const timeSinceLastActivity = Date.now() - connection.lastActivity;
               if (timeSinceLastActivity > 5000) {
                 logger.debug(`Sending keep-alive for ${connectionId}, ${timeSinceLastActivity}ms since activity`);
-                
-                // Try to send a WebRTC data channel ping if possible
-                if (peer.connected) {
-                  try {
-                    peer.send(Buffer.from([0])); // Empty ping packet
-                  } catch (sendErr) {
-                    // If data channel doesn't work, use WebSocket for keep-alive
-                    this.sendMessage(connectionId, { type: 'ping', timestamp: Date.now() });
-                  }
-                } else {
-                  // Fall back to WebSocket for keep-alive
-                  this.sendMessage(connectionId, { type: 'ping', timestamp: Date.now() });
-                }
-                
                 connection.lastActivity = Date.now();
               }
             } catch (pingErr) {
@@ -360,14 +390,6 @@ export class WebRTCService extends EventEmitter {
         
         // Send a connection-established message to the client
         this.sendMessage(connectionId, { type: 'connection-established' });
-      });
-      
-      peer.on('data', (chunk: Buffer) => {
-        // Update last activity timestamp
-        connection.lastActivity = Date.now();
-        
-        // Forward received data to listeners
-        this.emit('data', connectionId, chunk);
       });
       
       peer.on('error', (err: Error) => {
