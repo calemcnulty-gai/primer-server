@@ -151,8 +151,23 @@ export class VoiceService extends EventEmitter {
    */
   private handleAudioData(connectionId: string, audioChunk: Buffer): void {
     const connection = this.connections.get(connectionId);
-    if (!connection || !connection.isListening) {
-      logger.debug(`Ignoring audio chunk from connection ${connectionId}: connection not found or not listening`);
+    if (!connection) {
+      logger.debug(`Ignoring audio chunk from connection ${connectionId}: connection not found`);
+      return;
+    }
+    
+    // Update last activity time regardless of listening state
+    connection.lastActivity = Date.now();
+    
+    // If connection exists but isn't listening, log a more specific message
+    if (!connection.isListening) {
+      logger.debug(`Ignoring audio chunk from connection ${connectionId}: connection exists but not in listening state (state=${connection.state})`);
+      
+      // If connection is established but not listening, auto-start listening
+      if (connection.state === 'connected') {
+        logger.info(`Auto-starting listening for connection ${connectionId} that is sending audio`);
+        this.startListening(connectionId);
+      }
       return;
     }
     
@@ -161,9 +176,13 @@ export class VoiceService extends EventEmitter {
     
     // Update stats
     connection.totalAudioReceived += audioChunk.length;
-    connection.lastActivity = Date.now();
     
     logger.debug(`Received audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes, total received: ${connection.totalAudioReceived} bytes`);
+    
+    // If this is the first audio chunk after starting to listen, log it specially
+    if (connection.totalAudioReceived === audioChunk.length) {
+      logger.info(`🎉 Received first audio chunk from connection ${connectionId}, size: ${audioChunk.length} bytes`);
+    }
   }
 
   /**
@@ -173,6 +192,12 @@ export class VoiceService extends EventEmitter {
     const connection = this.connections.get(connectionId);
     if (!connection) {
       logger.warn(`Received message for unknown connection: ${connectionId}`);
+      // Try to recreate the connection if we receive messages for it
+      try {
+        this.sendError(connectionId, 'CONNECTION_NOT_FOUND', 'Connection needs to be re-established');
+      } catch (e) {
+        logger.error(`Failed to send error for unknown connection ${connectionId}:`, e);
+      }
       return;
     }
 
@@ -185,19 +210,29 @@ export class VoiceService extends EventEmitter {
       
       switch (data.type) {
         case 'offer':
+          logger.info(`Processing offer from ${connectionId} (connection state: ${connection.state})`);
           this.handleRTCOffer(connectionId, data);
           break;
           
         case 'ice-candidate':
+          logger.info(`Processing ICE candidate from ${connectionId} (connection state: ${connection.state})`);
           this.handleICECandidate(connectionId, data);
           break;
           
         case 'start-listening':
+          logger.info(`Processing start-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
           this.startListening(connectionId);
           break;
           
         case 'stop-listening':
+          logger.info(`Processing stop-listening from ${connectionId} (connection state: ${connection.state}, currently listening: ${connection.isListening})`);
           this.stopListening(connectionId);
+          break;
+          
+        case 'heartbeat':
+          // Handle heartbeat messages to keep the connection alive
+          logger.debug(`Received heartbeat from ${connectionId}`);
+          this.sendMessage(connectionId, { type: 'heartbeat-ack' });
           break;
           
         default:
@@ -205,6 +240,7 @@ export class VoiceService extends EventEmitter {
       }
     } catch (error) {
       logger.error(`Error processing message from connection ${connectionId}:`, error);
+      logger.error(`Raw message content: ${message.substring(0, 100)}${message.length > 100 ? '...' : ''}`);
       this.sendError(connectionId, 'INTERNAL_ERROR', 'Error processing message');
     }
   }
@@ -232,22 +268,24 @@ export class VoiceService extends EventEmitter {
     connection.state = 'connecting';
     logger.debug(`Changed connection state to 'connecting' for ${connectionId}`);
     
-    // Simulate creating and sending an RTC answer
-    setTimeout(() => {
-      const answerMessage = {
+    // Simulate creating and sending an RTC answer immediately (no timeout)
+    const answerMessage = {
+      type: 'answer',
+      sdp: {
+        // Mock SDP data that would normally come from RTCPeerConnection.createAnswer()
         type: 'answer',
-        sdp: {
-          // Mock SDP data that would normally come from RTCPeerConnection.createAnswer()
-          type: 'answer',
-          sdp: 'v=0\r\no=- 123456789 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n...'
-        }
-      };
-      
-      logger.info(`Sending WebRTC answer to connection ${connectionId}`);
-      this.sendMessage(connectionId, answerMessage);
-      connection.state = 'connected';
-      logger.debug(`Changed connection state to 'connected' for ${connectionId}`);
-    }, 500);
+        sdp: 'v=0\r\no=- 123456789 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE audio\r\n...'
+      }
+    };
+    
+    logger.info(`Sending WebRTC answer to connection ${connectionId}`);
+    this.sendMessage(connectionId, answerMessage);
+    connection.state = 'connected';
+    logger.debug(`Changed connection state to 'connected' for ${connectionId}`);
+    
+    // Automatically start listening for this connection to avoid missed audio chunks
+    this.startListening(connectionId);
+    logger.info(`Auto-started listening for connection ${connectionId} after successful offer`);
   }
 
   /**
@@ -264,21 +302,25 @@ export class VoiceService extends EventEmitter {
     // For the mock implementation, we'll just log that we received it
     logger.info(`Received ICE candidate from connection ${connectionId}`);
     
-    // Simulate sending our own ICE candidate
-    setTimeout(() => {
-      const iceMessage = {
-        type: 'ice-candidate',
-        candidate: {
-          // Mock ICE candidate data
-          candidate: 'candidate:123456789 1 udp 2122260223 192.168.1.1 56789 typ host generation 0',
-          sdpMLineIndex: 0,
-          sdpMid: 'audio'
-        }
-      };
-      
-      logger.info(`Sending ICE candidate to connection ${connectionId}`);
-      this.sendMessage(connectionId, iceMessage);
-    }, 200);
+    // Simulate sending our own ICE candidate immediately (no timeout)
+    const iceMessage = {
+      type: 'ice-candidate',
+      candidate: {
+        // Mock ICE candidate data
+        candidate: 'candidate:123456789 1 udp 2122260223 192.168.1.1 56789 typ host generation 0',
+        sdpMLineIndex: 0,
+        sdpMid: 'audio'
+      }
+    };
+    
+    logger.info(`Sending ICE candidate to connection ${connectionId}`);
+    this.sendMessage(connectionId, iceMessage);
+    
+    // Make sure connection state is advanced if still in 'new' state
+    if (connection.state === 'new') {
+      connection.state = 'connecting';
+      logger.info(`Updated connection ${connectionId} state to 'connecting' after ICE candidate`);
+    }
   }
 
   /**
