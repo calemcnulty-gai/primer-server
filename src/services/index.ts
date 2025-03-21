@@ -5,6 +5,7 @@ import { GeminiService } from './GeminiService';
 import { CartesiaService } from './CartesiaService';
 import { createLogger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
+import { MediasoupService } from './MediasoupService';
 
 const logger = createLogger('Services');
 
@@ -37,7 +38,7 @@ export type Services = ReturnType<typeof initializeServices>;
 /**
  * Set up WebSocket server with the services
  */
-export function setupWebSocketServer(server: any, services: Services, path: string = '/api/v1/voice') {
+export function setupWebSocketServer(server: any, path: string = '/api/v1/voice') {
   // Create WebSocket server
   const WebSocket = require('ws');
   const wss = new WebSocket.Server({ 
@@ -45,17 +46,21 @@ export function setupWebSocketServer(server: any, services: Services, path: stri
     path
   });
   
-  const { webrtc } = services;
+  const mediasoupService = new MediasoupService();
   
   // Handle new connections
-  wss.on('connection', (ws: any, req: any) => {
+  wss.on('connection', async (ws: any, req: any) => {
     // Generate unique connection ID
-    const connectionId = uuidv4();
+    const peerId = uuidv4();
     
-    logger.info(`New WebSocket connection: ${connectionId} on path ${path}`);
+    logger.info(`New WebSocket connection: ${peerId} on path ${path}`);
     
-    // Pass connection to WebRTC service for handling
-    webrtc.handleNewConnection(connectionId, ws);
+    try {
+      await mediasoupService.handleConnection(peerId, ws);
+    } catch (error) {
+      logger.error(`Failed to initialize mediasoup connection for peer ${peerId}:`, error);
+      ws.close();
+    }
   });
   
   logger.info(`WebSocket server configured on path ${path}`);

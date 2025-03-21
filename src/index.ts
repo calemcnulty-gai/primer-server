@@ -27,6 +27,8 @@ import { initializeServices, setupWebSocketServer } from './services';
 import { WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { v4 as uuidv4 } from 'uuid';
+import { VoiceService } from './services/VoiceService';
+import { WebRTCService } from './services/WebRTCService';
 
 const logger = createLogger('Server');
 
@@ -55,86 +57,102 @@ if (process.env.NODE_ENV !== 'test') {
   }
 }
 
-export const app = express();
-export const server = http.createServer(app);
+// Service instances that will be initialized during startup
+let voiceService: VoiceService;
+let webrtcService: WebRTCService;
 
-// Apply middlewares
-app.use(loggingMiddleware);
-app.use(corsMiddleware);
-app.use(express.json());
-app.use(responseFormatter());
-app.use(attachDeviceId);
+async function startServer() {
+  try {
+    // Create Express app
+    const app = express();
+    const server = http.createServer(app);
 
-// API Documentation
-const docsRouter = express.Router();
-setupSwaggerMiddleware(docsRouter);
-app.use('/', docsRouter);
+    // Configure middleware
+    app.use(loggingMiddleware);
+    app.use(corsMiddleware);
+    app.use(express.json());
+    app.use(responseFormatter());
+    app.use(attachDeviceId);
 
-// Basic health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+    // Error handling middleware
+    app.use(corsErrorHandler as any);
 
-// Routes should be defined here
-const v1Router = createBaseRouter('v1');
-v1Router.use('/health', healthRouter);
+    // Set up WebSocket server for voice
+    setupWebSocketServer(server);
 
-// Get API key from environment
-const apiKey = process.env.OPENAI_API_KEY || '';
-if (!apiKey) {
-  console.warn('WARNING: OPENAI_API_KEY not set in environment variables');
-}
+    // API Documentation
+    const docsRouter = express.Router();
+    setupSwaggerMiddleware(docsRouter);
+    app.use('/', docsRouter);
 
-// Mount story routes on API router
-v1Router.use('/story', initStoryRoutes(apiKey));
+    // Basic health check endpoint
+    app.get('/health', (req, res) => {
+      res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    });
 
-// Mount monitoring routes
-v1Router.use('/monitoring', initMonitoringRoutes());
+    // Routes should be defined here
+    const v1Router = createBaseRouter('v1');
+    v1Router.use('/health', healthRouter);
 
-// Initialize all services
-const services = initializeServices();
+    // Get API key from environment
+    const apiKey = process.env.OPENAI_API_KEY || '';
+    if (!apiKey) {
+      console.warn('WARNING: OPENAI_API_KEY not set in environment variables');
+    }
 
-// Initialize voice controller with the new service
-const voiceController = new VoiceController(services.voice, services.webrtc);
+    // Mount story routes on API router
+    v1Router.use('/story', initStoryRoutes(apiKey));
 
-// Mount voice routes
-v1Router.use('/voice', initVoiceRoutes(voiceController));
+    // Mount monitoring routes
+    v1Router.use('/monitoring', initMonitoringRoutes());
 
-// Add the main router to the app
-app.use((v1Router as any).mainRouter);
+    // Initialize all services
+    const services = initializeServices();
+    
+    // Store service instances
+    voiceService = services.voice;
+    webrtcService = services.webrtc;
 
-// Error handling middleware should be last
-app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  corsErrorHandler(err, req, res, next);
-});
-app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  errorHandler(err, req, res, next);
-});
+    // Initialize voice controller with the new service
+    const voiceController = new VoiceController(services.voice, services.webrtc);
 
-// Set up WebSocket with the WebRTC service
-setupWebSocketServer(server, services);
+    // Mount voice routes
+    v1Router.use('/voice', initVoiceRoutes(voiceController));
 
-// Export services for access from controllers
-export const voiceService = services.voice;
-export const webrtcService = services.webrtc;
+    // Add the main router to the app
+    app.use((v1Router as any).mainRouter);
 
-// Create server function for better testability
-export const createServer = (port: number = Number(process.env.PORT) || 3000) => {
-  // Validate API keys on startup
-  validateApiKeys();
-  
-  // Start the HTTP server
-  return server.listen(port, '0.0.0.0', () => {
+    // Error handling middleware should be last
+    app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      corsErrorHandler(err, req, res, next);
+    });
+    app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      errorHandler(err, req, res, next);
+    });
+
+    // Start the HTTP server
+    const port = Number(process.env.PORT) || 3000;
+    await server.listen(port, '0.0.0.0');
     console.log(`🚀 Server running at http://localhost:${port}`);
     console.log(`📚 API Documentation available at http://localhost:${port}/api-docs`);
     console.log(`🎤 Voice WebSocket server available at ws://localhost:${port}/api/v1/voice`);
-  });
-};
+
+    // Validate API keys on startup
+    validateApiKeys();
+
+  } catch (error) {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Export the service instances
+export { voiceService, webrtcService };
 
 // Export for testing
 export const isMainModule = () => require.main === module;
 
 // Start server if this file is run directly
 if (isMainModule()) {
-  createServer();
+  startServer();
 } 

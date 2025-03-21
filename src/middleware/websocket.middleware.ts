@@ -3,6 +3,8 @@ import * as WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { VoiceControllerInterface } from '../controllers/voiceController';
 import { WebRTCService } from '../services/WebRTCService';
+import { Request, Response, NextFunction } from 'express';
+import { logger } from '../utils/logger';
 
 /**
  * WebSocket middleware for handling voice connections
@@ -57,3 +59,20 @@ export function setupWebRTCWebSocket(
 
   return wss;
 }
+
+// Middleware to handle WebSocket upgrade requests
+export function websocketMiddleware(req: Request, res: Response, next: NextFunction) {
+  // Check if this is a WebSocket upgrade request
+  if (req.headers.upgrade?.toLowerCase() !== 'websocket') {
+    return next();
+  }
+
+  // Log WebSocket connection attempt
+  logger.info('WebSocket upgrade request received');
+
+  // Let the WebSocket server handle the upgrade
+  next();
+}
+
+// Export types for TypeScript support
+export type WebSocketWithId = WebSocket & { id?: string };
