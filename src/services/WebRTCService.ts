@@ -96,7 +96,11 @@ export class WebRTCService extends EventEmitter {
             kind: 'audio',
             mimeType: 'audio/opus',
             clockRate: 48000,
-            channels: 2
+            channels: 2,
+            parameters: {
+              minptime: 10,
+              useinbandfec: 1
+            }
           }
         ]
       });
@@ -114,8 +118,10 @@ export class WebRTCService extends EventEmitter {
       this.connections.set(connectionId, connection);
 
       // Handle WebSocket messages
-      ws.on('message', (message: any) => {
-        this.handleWebSocketMessage(connectionId, message);
+      ws.on('message', async (message: any) => {
+        // Update last activity timestamp
+        connection.lastActivity = Date.now();
+        await this.handleWebSocketMessage(connectionId, message);
       });
 
       // Handle WebSocket closure
@@ -129,10 +135,14 @@ export class WebRTCService extends EventEmitter {
         this.sendError(connectionId, 'CONNECTION_ERROR', error.message);
       });
 
-      // Send router RTP capabilities to client
+      // Send initial connection info to client
       this.sendMessage(connectionId, {
         type: 'connection-ready',
-        routerRtpCapabilities: router.rtpCapabilities
+        routerRtpCapabilities: router.rtpCapabilities,
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
       });
 
       this.emit('connection:new', connectionId);
@@ -154,137 +164,119 @@ export class WebRTCService extends EventEmitter {
     connection.lastActivity = Date.now();
 
     try {
+      // Ensure message is parsed if it's a string
       const data = typeof message === 'string' ? JSON.parse(message) : message;
       
       logger.debug(`Received message type ${data.type} from ${connectionId}`);
 
       switch (data.type) {
-        case 'connect-transport':
-          await this.handleConnectTransport(connectionId, data);
+        case 'offer':
+          logger.info(`Received WebRTC offer from ${connectionId}`);
+          if (!connection.router) {
+            logger.error('No router available for connection');
+            return;
+          }
+
+          // Create WebRTC transport if not exists
+          if (!connection.transport) {
+            connection.transport = await connection.router.createWebRtcTransport({
+              listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
+              enableUdp: true,
+              enableTcp: true,
+              preferUdp: true,
+              initialAvailableOutgoingBitrate: 800000
+            });
+
+            // Send transport parameters to client
+            this.sendMessage(connectionId, {
+              type: 'transport-created',
+              transportId: connection.transport.id,
+              iceParameters: connection.transport.iceParameters,
+              iceCandidates: connection.transport.iceCandidates,
+              dtlsParameters: connection.transport.dtlsParameters
+            });
+          }
           break;
 
-        case 'create-transport':
-          await this.handleCreateTransport(connectionId, data);
+        case 'connect-transport':
+          logger.info(`Connecting transport for ${connectionId}`);
+          if (!connection.transport) {
+            logger.error('No transport to connect');
+            return;
+          }
+
+          await connection.transport.connect({
+            dtlsParameters: data.dtlsParameters
+          });
+
+          connection.state = 'connected';
+          connection.connected = true;
           break;
 
         case 'produce':
-          await this.handleProduce(connectionId, data);
+          logger.info(`Setting up producer for ${connectionId}`);
+          if (!connection.transport) {
+            logger.error('No transport available for producing');
+            return;
+          }
+
+          const producer = await connection.transport.produce({
+            kind: 'audio',
+            rtpParameters: data.rtpParameters
+          });
+
+          connection.producer = producer;
+
+          // Log audio stream metadata
+          logger.info(`Audio producer created for ${connectionId}:`, {
+            id: producer.id,
+            kind: producer.kind,
+            type: producer.type,
+            paused: producer.paused,
+            score: producer.score
+          });
+
+          this.sendMessage(connectionId, {
+            type: 'producer-created',
+            producerId: producer.id
+          });
+
+          this.emit('stream', connectionId, producer);
+          break;
+
+        case 'start-listening':
+          logger.info(`Start listening request from ${connectionId}`, {
+            commandId: data.commandId,
+            debug: data.debug
+          });
+          
+          // Acknowledge the start-listening command
+          this.sendMessage(connectionId, {
+            type: 'listening-started',
+            commandId: data.commandId
+          });
+          break;
+
+        case 'stop-listening':
+          logger.info(`Stop listening request from ${connectionId}`);
+          this.sendMessage(connectionId, {
+            type: 'listening-stopped'
+          });
+          break;
+
+        case 'ice-candidate':
+        case 'candidate':
+          logger.debug(`Received ICE candidate from ${connectionId}`);
+          // ICE candidates are handled by mediasoup transport automatically
           break;
 
         default:
-          // Forward unhandled messages to listeners
-          this.emit('message', connectionId, data);
+          logger.debug(`Unhandled message type: ${data.type} from ${connectionId}`);
           break;
       }
     } catch (error) {
       logger.error(`Error processing message from ${connectionId}:`, error);
       this.sendError(connectionId, 'MESSAGE_ERROR', 'Failed to process message');
-    }
-  }
-
-  /**
-   * Handle transport creation request
-   */
-  private async handleCreateTransport(connectionId: string, data: any): Promise<void> {
-    const connection = this.connections.get(connectionId);
-    if (!connection || !connection.router) return;
-
-    try {
-      const transport = await connection.router.createWebRtcTransport({
-        listenIps: [{ ip: '0.0.0.0', announcedIp: null }],
-        enableUdp: true,
-        enableTcp: true,
-        preferUdp: true,
-        initialAvailableOutgoingBitrate: 800000
-      });
-
-      connection.transport = transport;
-      connection.state = 'connecting';
-
-      // Send transport parameters to client
-      this.sendMessage(connectionId, {
-        type: 'transport-created',
-        transportId: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters
-      });
-
-    } catch (error) {
-      logger.error(`Failed to create transport for ${connectionId}:`, error);
-      this.sendError(connectionId, 'TRANSPORT_ERROR', 'Failed to create transport');
-    }
-  }
-
-  /**
-   * Handle transport connection request
-   */
-  private async handleConnectTransport(connectionId: string, data: any): Promise<void> {
-    const connection = this.connections.get(connectionId);
-    if (!connection || !connection.transport) return;
-
-    try {
-      await connection.transport.connect({
-        dtlsParameters: data.dtlsParameters
-      });
-
-      connection.state = 'connected';
-      connection.connected = true;
-      
-      this.sendMessage(connectionId, {
-        type: 'transport-connected'
-      });
-
-      this.emit('connection:ready', connectionId);
-
-    } catch (error) {
-      logger.error(`Failed to connect transport for ${connectionId}:`, error);
-      this.sendError(connectionId, 'TRANSPORT_CONNECT_ERROR', 'Failed to connect transport');
-    }
-  }
-
-  /**
-   * Handle produce request (client wants to send audio)
-   */
-  private async handleProduce(connectionId: string, data: any): Promise<void> {
-    const connection = this.connections.get(connectionId);
-    if (!connection || !connection.transport) return;
-
-    try {
-      const producer = await connection.transport.produce({
-        kind: 'audio',
-        rtpParameters: data.rtpParameters
-      });
-
-      connection.producer = producer;
-
-      // Log audio stream metadata
-      logger.info(`Audio producer created for ${connectionId}:`, {
-        id: producer.id,
-        kind: producer.kind,
-        type: producer.type,
-        paused: producer.paused,
-        score: producer.score
-      });
-
-      // Monitor producer stats
-      setInterval(async () => {
-        const stats = await producer.getStats();
-        logger.debug(`Producer stats for ${connectionId}:`, stats);
-      }, 10000);
-
-      // Send producer ID to client
-      this.sendMessage(connectionId, {
-        type: 'producer-created',
-        producerId: producer.id
-      });
-
-      // Emit stream event with producer
-      this.emit('stream', connectionId, producer);
-
-    } catch (error) {
-      logger.error(`Failed to create producer for ${connectionId}:`, error);
-      this.sendError(connectionId, 'PRODUCE_ERROR', 'Failed to create producer');
     }
   }
 
