@@ -83,7 +83,22 @@ export class VoiceService extends EventEmitter {
     
     // Handle incoming audio stream
     this.webrtcService.on('stream', (connectionId: string, stream: any) => {
-      this.handleAudioStream(connectionId, stream);
+      const session = this.sessions.get(connectionId);
+      if (!session) {
+        logger.warn(`Received stream for nonexistent session: ${connectionId}`);
+        this.createSession(connectionId);
+      }
+      
+      const updatedSession = this.sessions.get(connectionId)!;
+      updatedSession.stream = stream; // Store stream regardless of isListening
+      logger.info(`Stored audio stream for ${connectionId}, isListening=${updatedSession.isListening}`);
+      
+      if (updatedSession.isListening) {
+        logger.info(`Session already listening, initiating audio processing for ${connectionId}`);
+        this.handleAudioStream(connectionId, stream); // Process immediately if already listening
+      } else {
+        logger.info(`Stream stored but waiting for start-listening command for ${connectionId}`);
+      }
     });
     
     // Handle client messages
@@ -292,12 +307,16 @@ export class VoiceService extends EventEmitter {
     }
 
     if (!session.isListening) {
-      logger.debug(`Ignoring audio stream from ${connectionId} - not in listening mode`);
-      return;
+      logger.debug(`Storing stream but not processing yet for ${connectionId} - not in listening mode`);
+      return; // Stream is already stored, wait for startListening
+    }
+
+    if (session.deepgramConnection) {
+      logger.info(`Audio processing already active for ${connectionId}, skipping duplicate setup`);
+      return; // Prevent multiple setups for the same stream
     }
 
     try {
-      // Get audio tracks from the stream
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length === 0) {
         logger.warn(`No audio tracks found in stream from ${connectionId}`);
@@ -306,9 +325,6 @@ export class VoiceService extends EventEmitter {
 
       logger.info(`Processing audio stream for ${connectionId} with ${audioTracks.length} tracks`);
       logger.debug(`Audio track details: kind=${audioTracks[0].kind}, id=${audioTracks[0].id}, readyState=${audioTracks[0].readyState}, enabled=${audioTracks[0].enabled}`);
-
-      // Store the stream reference
-      session.stream = stream;
 
       // Create an AudioContext to process the stream
       const audioContext = new AudioContext({ sampleRate: 16000 });
@@ -555,27 +571,21 @@ export class VoiceService extends EventEmitter {
       return false;
     }
     
-    // Log current session state
     logger.info(`Starting to listen for ${connectionId}, current state: isListening=${session.isListening}`);
     
     if (session.isListening) {
       logger.info(`Already listening to ${connectionId}, sending confirmation`);
-      // Send confirmation even if already listening to ensure client is in sync
       this.webrtcService.sendMessage(connectionId, { type: 'listening-started' });
       return true;
     }
 
-    // Check WebRTC connection state (but be more lenient about it)
     const isConnected = this.webrtcService.isConnected(connectionId);
     const peerConnection = this.webrtcService.getPeerConnection(connectionId);
-    
-    // Get detailed connection states for debugging
     const peerState = peerConnection?.connectionState || 'unknown';
     const iceState = peerConnection?.iceConnectionState || 'unknown';
     
     logger.info(`WebRTC connection check for ${connectionId}: isConnected=${isConnected}, peer=${peerState}, ice=${iceState}`);
     
-    // More relaxed connection check - accept checking/connected/completed states
     const hasValidConnectionState = 
       isConnected || 
       peerState === 'connected' || 
@@ -597,7 +607,14 @@ export class VoiceService extends EventEmitter {
     
     logger.info(`Started listening to ${connectionId} (isListening=${session.isListening})`);
     
-    // Send confirmation that we've started listening, but don't reset state if it fails
+    // If we already have a stream, start processing it now
+    if (session.stream) {
+      logger.info(`Stream already available for ${connectionId}, starting audio processing`);
+      this.handleAudioStream(connectionId, session.stream);
+    } else {
+      logger.info(`Waiting for stream to arrive for ${connectionId}`);
+    }
+    
     const success = this.webrtcService.sendMessage(connectionId, { 
       type: 'listening-started',
       timestamp: Date.now()
@@ -605,10 +622,8 @@ export class VoiceService extends EventEmitter {
     
     if (!success) {
       logger.error(`Failed to send listening-started message to ${connectionId}, but continuing to listen`);
-      // Don't reset isListening - we want to keep listening even if confirmation fails
     }
     
-    // Return true since we successfully started listening, even if confirmation failed
     return true;
   }
 
