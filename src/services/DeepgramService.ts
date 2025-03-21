@@ -3,6 +3,9 @@ import { createLogger } from '../utils/logger';
 import dotenv from 'dotenv';
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
 
 // Load environment variables
 dotenv.config();
@@ -23,6 +26,8 @@ export class DeepgramService extends EventEmitter {
   private apiKey: string;
   private apiUrl: string;
   private streamingUrl: string;
+  private debugMode: boolean;
+  private debugDir: string;
 
   constructor() {
     super();
@@ -32,6 +37,117 @@ export class DeepgramService extends EventEmitter {
     }
     this.apiUrl = 'https://api.deepgram.com/v1/listen';
     this.streamingUrl = 'wss://api.deepgram.com/v1/listen';
+    
+    // Enable debug mode (can set to false in production)
+    this.debugMode = process.env.DEBUG_DEEPGRAM === 'true' || true;
+    this.debugDir = path.join(process.cwd(), 'debug_audio');
+    
+    // Create debug directory if it doesn't exist
+    if (this.debugMode) {
+      try {
+        if (!fs.existsSync(this.debugDir)) {
+          fs.mkdirSync(this.debugDir, { recursive: true });
+          logger.info(`Created debug directory at ${this.debugDir}`);
+        }
+      } catch (error) {
+        logger.error('Failed to create debug directory:', error);
+        this.debugMode = false;
+      }
+    }
+  }
+
+  /**
+   * Save audio data to file for debugging
+   * @param audioData Audio buffer to save
+   * @returns Path to saved file or null if saving failed
+   */
+  private saveAudioForDebug(audioData: Buffer): string | null {
+    if (!this.debugMode) return null;
+    
+    try {
+      // Generate a unique filename with timestamp and random string
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const randomId = crypto.randomBytes(4).toString('hex');
+      const filename = `deepgram_audio_${timestamp}_${randomId}.pcm`;
+      const filePath = path.join(this.debugDir, filename);
+      
+      // Write the audio buffer to file
+      fs.writeFileSync(filePath, audioData);
+      logger.info(`Saved audio sample to ${filePath} (${audioData.length} bytes)`);
+      
+      // Calculate and log audio duration (assuming 16kHz, 16-bit mono)
+      const durationSeconds = audioData.length / (16000 * 2);
+      logger.info(`Audio duration: ${durationSeconds.toFixed(2)} seconds (${(durationSeconds * 1000).toFixed(0)}ms)`);
+      
+      // Log first 32 bytes in hex for debugging
+      const hex = audioData.slice(0, 32).toString('hex');
+      logger.info(`First 32 bytes: ${hex.match(/../g)?.join(' ')}`);
+      
+      return filePath;
+    } catch (error) {
+      logger.error('Failed to save audio for debugging:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Analyze audio buffer for diagnostic information
+   * @param audioData Audio buffer to analyze
+   * @returns Details about the audio data
+   */
+  private analyzeAudio(audioData: Buffer): any {
+    if (audioData.length < 100) {
+      return { valid: false, reason: 'Buffer too small' };
+    }
+    
+    // Assuming 16-bit PCM (linear16)
+    const samples = audioData.length / 2;
+    const durationMs = (samples / 16000) * 1000;
+    
+    // Calculate some basic audio stats
+    let min = 0, max = 0, sumAbs = 0;
+    let zeroCrossings = 0;
+    let prevSample = 0;
+    
+    for (let i = 0; i < audioData.length; i += 2) {
+      // Convert two bytes to a 16-bit sample (little-endian)
+      const sample = audioData.readInt16LE(i);
+      
+      // Update stats
+      min = Math.min(min, sample);
+      max = Math.max(max, sample);
+      sumAbs += Math.abs(sample);
+      
+      // Count zero crossings (sign changes)
+      if ((prevSample >= 0 && sample < 0) || (prevSample < 0 && sample >= 0)) {
+        zeroCrossings++;
+      }
+      prevSample = sample;
+    }
+    
+    const avgAbs = sumAbs / samples;
+    const avgDbFS = 20 * Math.log10(avgAbs / 32768); // Reference level is 16-bit max
+    
+    // Check for potential silence (very low amplitude)
+    const isSilence = avgDbFS < -45; // -45 dBFS is very quiet
+    
+    return {
+      valid: true,
+      samples,
+      durationMs,
+      minSample: min,
+      maxSample: max,
+      avgAbs,
+      avgDbFS: avgDbFS.toFixed(2) + " dBFS",
+      zeroCrossings,
+      zeroCrossingRate: (zeroCrossings / (durationMs / 1000)).toFixed(2) + " Hz",
+      isSilence,
+      possibleIssues: [
+        isSilence ? "Audio appears to be silent or very quiet" : null,
+        min > -100 && max < 100 ? "Extremely low amplitude - likely silence" : null,
+        min === 0 && max === 0 ? "All zero values - invalid audio" : null
+      ].filter(Boolean)
+    };
   }
 
   /**
@@ -49,6 +165,17 @@ export class DeepgramService extends EventEmitter {
       
       // Debug info for audio format
       logger.info(`Transcribing audio with Deepgram: ${audioData.length} bytes`);
+      
+      // Save audio sample for debugging
+      this.saveAudioForDebug(audioData);
+      
+      // Analyze audio for issues
+      const analysis = this.analyzeAudio(audioData);
+      logger.info(`Audio analysis: ${JSON.stringify(analysis, null, 2)}`);
+      
+      if (analysis.isSilence) {
+        logger.warn(`Audio appears to be silent: ${analysis.avgDbFS}`);
+      }
       
       // Optimize for PCM audio (linear16)
       // Consistently use 16kHz, mono, 16-bit PCM to match client settings
@@ -70,6 +197,7 @@ export class DeepgramService extends EventEmitter {
 
       // Log the raw response for debugging
       logger.info(`Deepgram response status: ${response.status}`);
+      logger.debug(`Deepgram full response: ${JSON.stringify(response.data)}`);
       
       // Get the transcript from the response
       const transcript = response.data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
@@ -77,13 +205,22 @@ export class DeepgramService extends EventEmitter {
       
       // If no transcript was generated but the API call was successful
       if (transcript === '') {
-        logger.warn('Deepgram returned empty transcript, using fallback text');
-        return 'I heard something but couldn\'t make out the words. Could you speak louder or more clearly?';
+        const confidence = response.data?.results?.channels?.[0]?.alternatives?.[0]?.confidence || 0;
+        logger.warn(`Deepgram returned empty transcript with confidence: ${confidence}`);
+        
+        if (analysis.isSilence) {
+          return 'I didn\'t hear anything. Please speak into your microphone.';
+        } else {
+          return 'I heard something but couldn\'t make out the words. Could you speak louder or more clearly?';
+        }
       }
       
       return transcript;
     } catch (error) {
       logger.error('Error transcribing audio:', error);
+      if (error.response?.data) {
+        logger.error('Deepgram error response:', error.response.data);
+      }
       
       // For robustness in production, return a fallback rather than throwing
       return 'Sorry, I had trouble understanding that. Could you try again?';

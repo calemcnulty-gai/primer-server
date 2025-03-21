@@ -24,6 +24,32 @@ import { initVoiceRoutes } from './routes/voice.routes';
 import { attachDeviceId } from './middleware/deviceId';
 import { VoiceController } from './controllers/voiceController';
 import { VoiceService } from './services/VoiceService';
+import { LogLevel, setServiceLogLevel, setGlobalLogLevel } from './utils/logger';
+
+// Configure logging levels
+if (process.env.NODE_ENV !== 'test') {
+  // Set default log level based on environment
+  const defaultLogLevel = process.env.NODE_ENV === 'production' 
+    ? LogLevel.WARN  // Less verbose in production 
+    : LogLevel.INFO; // More verbose in development
+  
+  // Set global default log level
+  setGlobalLogLevel(defaultLogLevel);
+  
+  // Set specific service log levels
+  setServiceLogLevel('VoiceService', LogLevel.WARN);    // Reduce verbosity for VoiceService
+  setServiceLogLevel('DeepgramService', LogLevel.DEBUG); // Detailed logs for Deepgram debugging
+  setServiceLogLevel('CartesiaService', LogLevel.INFO);  // Normal logs for CartesiaService
+  
+  // Allow override from environment variables (e.g. LOG_LEVEL=1 for INFO only)
+  if (process.env.LOG_LEVEL) {
+    const level = parseInt(process.env.LOG_LEVEL, 10);
+    if (!isNaN(level) && level >= LogLevel.DEBUG && level <= LogLevel.NONE) {
+      console.log(`Overriding log level from environment: ${LogLevel[level]}`);
+      setGlobalLogLevel(level);
+    }
+  }
+}
 
 export const app = express();
 export const server = http.createServer(app);
