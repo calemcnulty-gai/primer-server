@@ -277,7 +277,7 @@ export class WebRTCService extends EventEmitter {
         initiator: false,
         trickle: true,
         config: { iceServers: this.iceServers },
-        objectMode: true, // Enable object mode for proper data handling
+        objectMode: true,
         sdpTransform: (sdp) => {
           // Ensure proper audio stream configuration
           sdp = sdp.replace('a=recvonly', 'a=sendrecv');
@@ -295,7 +295,7 @@ export class WebRTCService extends EventEmitter {
       connection.peer = peer;
 
       // Handle incoming audio tracks
-      peer.on('track', (track, stream) => {
+      peer.on('track', (track: any, stream: any) => {
         logger.info(`Received audio track for ${connectionId}: kind=${track.kind}, id=${track.id}`);
         
         if (track.kind === 'audio') {
@@ -308,30 +308,20 @@ export class WebRTCService extends EventEmitter {
             readyState: track.readyState
           });
 
-          // Set up direct data handling from the track
-          track.on('data', (data: Buffer) => {
-            if (!connection.connected) return;
-            logger.debug(`Received audio data: size=${data.length} bytes, connectionId=${connectionId}`);
-            this.emit('data', connectionId, data);
-          });
-
-          track.on('ended', () => {
+          // Handle track ended
+          track.onended = () => {
             logger.info(`Audio track ended for ${connectionId}`);
-          });
-
-          track.on('error', (error) => {
-            logger.error(`Audio track error for ${connectionId}:`, error);
-          });
+          };
         }
       });
 
       // Handle incoming media streams
-      peer.on('stream', (stream) => {
+      peer.on('stream', (stream: any) => {
         const audioTracks = stream.getAudioTracks();
         logger.info(`Received media stream for ${connectionId}: ${audioTracks.length} audio tracks`);
         
         // Log stream details
-        audioTracks.forEach((track, index) => {
+        audioTracks.forEach((track: any, index: number) => {
           logger.info(`Audio track ${index + 1}/${audioTracks.length} for ${connectionId}:`, {
             id: track.id,
             kind: track.kind,
@@ -340,6 +330,9 @@ export class WebRTCService extends EventEmitter {
             readyState: track.readyState
           });
         });
+
+        // Emit the stream for audio processing
+        this.emit('data', connectionId, stream);
       });
       
       // Set up peer event handlers
