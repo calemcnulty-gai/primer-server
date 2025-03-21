@@ -22,11 +22,13 @@ import { initMonitoringRoutes } from './routes/monitoring.routes';
 import { initVoiceRoutes } from './routes/voice.routes';
 import { attachDeviceId } from './middleware/deviceId';
 import { VoiceController } from './controllers/voiceController';
-import { LogLevel, setServiceLogLevel, setGlobalLogLevel } from './utils/logger';
+import { LogLevel, setServiceLogLevel, setGlobalLogLevel, createLogger } from './utils/logger';
 import { initializeServices, setupWebSocketServer } from './services';
-import { WebSocket, IncomingMessage } from 'ws';
+import { WebSocket } from 'ws';
+import { IncomingMessage } from 'http'; // Use IncomingMessage from http instead of ws
 import { generateRandomId } from './utils/utils';
-import { logger } from './utils/logger';
+
+const logger = createLogger('Server');
 
 // Configure logging levels
 if (process.env.NODE_ENV !== 'test') {
