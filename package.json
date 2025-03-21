@@ -34,6 +34,7 @@
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "glob": "^11.0.1",
+    "mediasoup": "^3.15.6",
     "node-audiorecorder": "^3.0.0",
     "node-wav": "^0.0.2",
     "node-web-audio-api": "^1.0.4",

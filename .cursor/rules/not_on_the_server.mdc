@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+your tool access is for my dev machine, not the server. you can build and run the project to check that it succeeds but it will have no effect on the running server.

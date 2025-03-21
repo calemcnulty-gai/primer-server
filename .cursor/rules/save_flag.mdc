@@ -1,0 +1,6 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+if you're (un)installing an npm package, always use --save or --saveDev
