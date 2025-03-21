@@ -308,11 +308,36 @@ export class WebRTCService extends EventEmitter {
           }
 
           if (!data.rtpParameters) {
+            logger.error(`Missing RTP parameters in create-producer request from ${connectionId}`, {
+              messageData: data,
+              connectionState: connection.state,
+              transportState: connection.transport ? {
+                id: connection.transport.id,
+                closed: connection.transport.closed,
+                iceState: connection.transport.iceState,
+                dtlsState: connection.transport.dtlsState
+              } : 'no transport'
+            });
             this.sendError(connectionId, 'INVALID_PARAMETERS', 'Missing RTP parameters');
             return;
           }
 
+          // Validate RTP parameters structure
+          if (!data.rtpParameters.codecs || !Array.isArray(data.rtpParameters.codecs)) {
+            logger.error(`Invalid RTP parameters structure from ${connectionId}`, {
+              rtpParameters: data.rtpParameters
+            });
+            this.sendError(connectionId, 'INVALID_PARAMETERS', 'Invalid RTP parameters structure');
+            return;
+          }
+
           try {
+            logger.info(`Creating producer for ${connectionId} with RTP parameters:`, {
+              codecs: data.rtpParameters.codecs,
+              encodings: data.rtpParameters.encodings,
+              headerExtensions: data.rtpParameters.headerExtensions
+            });
+
             const producer = await connection.transport.produce({
               kind: 'audio',
               rtpParameters: data.rtpParameters
@@ -325,7 +350,8 @@ export class WebRTCService extends EventEmitter {
               kind: producer.kind,
               type: producer.type,
               paused: producer.paused,
-              score: producer.score
+              score: producer.score,
+              rtpParameters: producer.rtpParameters
             });
 
             producer.observer.on('score', (score) => {
@@ -334,6 +360,7 @@ export class WebRTCService extends EventEmitter {
 
             producer.observer.on('close', () => {
               logger.info(`Producer closed for ${connectionId}`);
+              connection.producer = undefined;
             });
 
             this.sendMessage(connectionId, {
@@ -343,8 +370,12 @@ export class WebRTCService extends EventEmitter {
 
             this.emit('stream', connectionId, producer);
           } catch (error) {
-            logger.error(`Failed to create producer for ${connectionId}:`, error);
-            this.sendError(connectionId, 'PRODUCE_ERROR', 'Failed to create producer');
+            const errorMessage = error instanceof Error ? error.message : 'Failed to create producer';
+            logger.error(`Failed to create producer for ${connectionId}:`, {
+              error: errorMessage,
+              rtpParameters: data.rtpParameters
+            });
+            this.sendError(connectionId, 'PRODUCE_ERROR', errorMessage);
           }
           break;
 
