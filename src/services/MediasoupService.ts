@@ -320,7 +320,18 @@ export class MediasoupService extends EventEmitter {
       throw new Error('Transport not connected');
     }
 
-    logger.info('Creating producer', { transportId, kind });
+    logger.info('Creating producer', { 
+      peerId: peer.id,
+      transportId, 
+      kind,
+      rtpParameters: {
+        ...rtpParameters,
+        codecs: rtpParameters.codecs.map((codec: any) => ({
+          ...codec,
+          parameters: codec.parameters
+        }))
+      }
+    });
 
     try {
       const producer = await transport.produce({
@@ -330,15 +341,50 @@ export class MediasoupService extends EventEmitter {
 
       peer.producers.set(producer.id, producer);
 
+      // Enhanced producer event logging
       producer.observer.on('close', () => {
-        logger.info('Producer closed', { producerId: producer.id });
+        logger.info('Producer closed', { 
+          peerId: peer.id,
+          producerId: producer.id,
+          kind: producer.kind
+        });
         peer.producers.delete(producer.id);
+      });
+
+      producer.observer.on('pause', () => {
+        logger.info('Producer paused', {
+          peerId: peer.id,
+          producerId: producer.id,
+          kind: producer.kind
+        });
+      });
+
+      producer.observer.on('resume', () => {
+        logger.info('Producer resumed', {
+          peerId: peer.id,
+          producerId: producer.id,
+          kind: producer.kind
+        });
+      });
+
+      // Log successful producer creation
+      logger.info('Producer created successfully', {
+        peerId: peer.id,
+        producerId: producer.id,
+        kind: producer.kind,
+        type: producer.type,
+        paused: producer.paused
       });
 
       return { id: producer.id };
 
     } catch (error) {
-      logger.error('Failed to create producer:', error);
+      logger.error('Failed to create producer:', {
+        peerId: peer.id,
+        transportId,
+        kind,
+        error: error instanceof Error ? error.message : String(error)
+      });
       throw error;
     }
   }
@@ -352,62 +398,123 @@ export class MediasoupService extends EventEmitter {
     }
 
     if (!peer.router?.canConsume({ producerId, rtpCapabilities })) {
+      logger.warn('Cannot consume producer', {
+        peerId: peer.id,
+        transportId,
+        producerId,
+        reason: 'Incompatible RTP capabilities'
+      });
       throw new Error('Cannot consume this producer');
     }
 
-    logger.info(`Creating consumer for peer ${peer.id}`, {
+    logger.info('Creating consumer', {
+      peerId: peer.id,
       transportId,
-      producerId
-    });
-
-    const consumer = await transport.consume({
       producerId,
-      rtpCapabilities,
-      paused: true // Start paused
+      rtpCapabilities: {
+        codecs: rtpCapabilities.codecs.map((codec: any) => ({
+          ...codec,
+          parameters: codec.parameters
+        }))
+      }
     });
 
-    peer.consumers.set(consumer.id, consumer);
-
-    // Log consumer events
-    consumer.on('transportclose', () => {
-      logger.info(`Consumer transport closed`, {
-        peerId: peer.id,
-        consumerId: consumer.id
+    try {
+      const consumer = await transport.consume({
+        producerId,
+        rtpCapabilities,
+        paused: true // Start paused
       });
-      peer.consumers.delete(consumer.id);
-    });
 
-    consumer.on('producerclose', () => {
-      logger.info(`Consumer producer closed`, {
-        peerId: peer.id,
-        consumerId: consumer.id
+      peer.consumers.set(consumer.id, consumer);
+
+      // Enhanced consumer event logging
+      consumer.on('transportclose', () => {
+        logger.info('Consumer transport closed', {
+          peerId: peer.id,
+          consumerId: consumer.id,
+          kind: consumer.kind
+        });
+        peer.consumers.delete(consumer.id);
       });
-      peer.consumers.delete(consumer.id);
-      this.sendNotification(peer, 'producerClosed', { consumerId: consumer.id });
-    });
 
-    consumer.on('score', (score) => {
-      logger.debug('Consumer score updated', {
+      consumer.on('producerclose', () => {
+        logger.info('Consumer producer closed', {
+          peerId: peer.id,
+          consumerId: consumer.id,
+          kind: consumer.kind
+        });
+        peer.consumers.delete(consumer.id);
+        this.sendNotification(peer, 'producerClosed', { consumerId: consumer.id });
+      });
+
+      consumer.on('producerpause', () => {
+        logger.info('Producer paused - consumer affected', {
+          peerId: peer.id,
+          consumerId: consumer.id,
+          kind: consumer.kind
+        });
+      });
+
+      consumer.on('producerresume', () => {
+        logger.info('Producer resumed - consumer affected', {
+          peerId: peer.id,
+          consumerId: consumer.id,
+          kind: consumer.kind
+        });
+      });
+
+      consumer.on('score', (score) => {
+        // Only log significant score changes to avoid spam
+        if (score.score < 5) { // Log poor scores
+          logger.warn('Consumer score is poor', {
+            peerId: peer.id,
+            consumerId: consumer.id,
+            score: score.score,
+            producerScore: score.producerScore,
+            producerScores: score.producerScores
+          });
+        } else if (score.score < 7) { // Log mediocre scores
+          logger.info('Consumer score is mediocre', {
+            peerId: peer.id,
+            consumerId: consumer.id,
+            score: score.score
+          });
+        }
+      });
+
+      logger.info('Consumer created successfully', {
         peerId: peer.id,
         consumerId: consumer.id,
-        score
+        kind: consumer.kind,
+        type: consumer.type,
+        producerPaused: consumer.producerPaused,
+        rtpParameters: {
+          codecs: consumer.rtpParameters.codecs.map(codec => ({
+            ...codec,
+            parameters: codec.parameters
+          }))
+        }
       });
-    });
 
-    logger.info(`Created consumer for peer ${peer.id}`, {
-      consumerId: consumer.id,
-      kind: consumer.kind,
-      type: consumer.type
-    });
+      return {
+        id: consumer.id,
+        producerId,
+        kind: consumer.kind,
+        rtpParameters: consumer.rtpParameters,
+        type: consumer.type,
+        producerPaused: consumer.producerPaused
+      };
 
-    return {
-      id: consumer.id,
-      producerId,
-      kind: consumer.kind,
-      rtpParameters: consumer.rtpParameters,
-      type: consumer.type,
-      producerPaused: consumer.producerPaused
-    };
+    } catch (error) {
+      logger.error('Failed to create consumer:', {
+        peerId: peer.id,
+        transportId,
+        producerId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   }
 
   private handlePeerDisconnection(peer: Peer): void {
