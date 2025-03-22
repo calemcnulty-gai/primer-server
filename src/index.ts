@@ -28,7 +28,7 @@ import { WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { v4 as uuidv4 } from 'uuid';
 import { VoiceService } from './services/VoiceService';
-import { WebRTCService } from './services/WebRTCService';
+import { MediasoupService } from './services/MediasoupService';
 
 const logger = createLogger('Server');
 
@@ -59,7 +59,7 @@ if (process.env.NODE_ENV !== 'test') {
 
 // Service instances that will be initialized during startup
 let voiceService: VoiceService;
-let webrtcService: WebRTCService;
+let mediasoupService: MediasoupService;
 
 async function startServer() {
   try {
@@ -111,10 +111,10 @@ async function startServer() {
     
     // Store service instances
     voiceService = services.voice;
-    webrtcService = services.webrtc;
+    mediasoupService = services.mediasoup;
 
     // Initialize voice controller with the new service
-    const voiceController = new VoiceController(services.voice, services.webrtc);
+    const voiceController = new VoiceController(services.voice, services.mediasoup);
 
     // Mount voice routes
     v1Router.use('/voice', initVoiceRoutes(voiceController));
@@ -147,7 +147,7 @@ async function startServer() {
 }
 
 // Export the service instances
-export { voiceService, webrtcService };
+export { voiceService, mediasoupService };
 
 // Export for testing
 export const isMainModule = () => require.main === module;

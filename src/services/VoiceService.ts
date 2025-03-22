@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { DeepgramService } from './DeepgramService';
 import { CartesiaService, CartesiaResponse } from './CartesiaService';
-import { WebRTCService } from './WebRTCService';
+import { MediasoupService } from './MediasoupService';
 import { createLogger } from '../utils/logger';
 import * as mediasoup from 'mediasoup';
 
@@ -19,15 +19,15 @@ interface AudioSession {
 export class VoiceService extends EventEmitter {
   private sessions: Map<string, AudioSession>;
   private status: 'initializing' | 'running' | 'error';
-  private webrtcService: WebRTCService;
+  private mediasoupService: MediasoupService;
   private deepgramService: DeepgramService;
   private cartesiaService: CartesiaService;
 
-  constructor(webrtcService: WebRTCService) {
+  constructor(mediasoupService: MediasoupService) {
     super();
     this.sessions = new Map();
     this.status = 'initializing';
-    this.webrtcService = webrtcService;
+    this.mediasoupService = mediasoupService;
 
     // Initialize services
     this.deepgramService = new DeepgramService();
@@ -35,51 +35,45 @@ export class VoiceService extends EventEmitter {
 
     logger.info('Voice service created with necessary services initialized');
     
-    // Register event handlers for WebRTC events
-    this.setupWebRTCListeners();
+    // Register event handlers for mediasoup events
+    this.setupMediasoupListeners();
     
     this.initialize();
   }
 
   /**
-   * Setup listeners for WebRTC events
+   * Setup listeners for mediasoup events
    */
-  private setupWebRTCListeners(): void {
+  private setupMediasoupListeners(): void {
     // Handle new connections
-    this.webrtcService.on('connection:new', (connectionId: string) => {
-      logger.info(`New WebRTC connection initiated: ${connectionId}`);
+    this.mediasoupService.on('peer:new', (peerId: string) => {
+      logger.info(`New mediasoup connection initiated: ${peerId}`);
     });
     
     // Handle established connections
-    this.webrtcService.on('connection:ready', (connectionId: string) => {
-      logger.info(`WebRTC connection ready for ${connectionId}, creating voice session`);
-      this.createSession(connectionId);
-      
-      // Send a confirmation message to the client
-      this.webrtcService.sendMessage(connectionId, { 
-        type: 'voice-session-ready',
-        message: 'Voice session is ready to accept commands'
-      });
+    this.mediasoupService.on('peer:ready', (peerId: string) => {
+      logger.info(`Mediasoup connection ready for ${peerId}, creating voice session`);
+      this.createSession(peerId);
     });
     
     // Handle closed connections
-    this.webrtcService.on('connection:closed', (connectionId: string) => {
-      logger.info(`WebRTC connection closed for ${connectionId}, cleaning up voice session`);
-      this.deleteSession(connectionId);
+    this.mediasoupService.on('peer:closed', (peerId: string) => {
+      logger.info(`Mediasoup connection closed for ${peerId}, cleaning up voice session`);
+      this.deleteSession(peerId);
     });
     
     // Handle incoming audio producer
-    this.webrtcService.on('stream', (connectionId: string, producer: mediasoup.types.Producer) => {
-      const session = this.sessions.get(connectionId);
+    this.mediasoupService.on('producer:new', (peerId: string, producer: mediasoup.types.Producer) => {
+      const session = this.sessions.get(peerId);
       if (!session) {
-        logger.warn(`Received producer for nonexistent session: ${connectionId}`);
-        this.createSession(connectionId);
+        logger.warn(`Received producer for nonexistent session: ${peerId}`);
+        this.createSession(peerId);
       }
       
-      const updatedSession = this.sessions.get(connectionId)!;
+      const updatedSession = this.sessions.get(peerId)!;
       updatedSession.producer = producer;
       
-      logger.info(`Received audio producer for ${connectionId}:`, {
+      logger.info(`Received audio producer for ${peerId}:`, {
         id: producer.id,
         kind: producer.kind,
         type: producer.type,
@@ -87,28 +81,10 @@ export class VoiceService extends EventEmitter {
       });
       
       if (updatedSession.isListening) {
-        logger.info(`Session already listening, initiating audio processing for ${connectionId}`);
-        this.handleAudioProducer(connectionId, producer);
+        logger.info(`Session already listening, initiating audio processing for ${peerId}`);
+        this.handleAudioProducer(peerId, producer);
       } else {
-        logger.info(`Producer stored but waiting for start-listening command for ${connectionId}`);
-      }
-    });
-    
-    // Handle client messages
-    this.webrtcService.on('message', (connectionId: string, message: any) => {
-      logger.debug(`WebRTC message received from ${connectionId}: ${message.type}`);
-      this.handleClientMessage(connectionId, message);
-    });
-    
-    // Handle errors
-    this.webrtcService.on('error', (connectionId: string, code: string, message: string) => {
-      logger.error(`WebRTC error for ${connectionId}: ${code} - ${message}`);
-      
-      // If there's a voice session, we should stop listening
-      const session = this.sessions.get(connectionId);
-      if (session && session.isListening) {
-        logger.info(`Stopping listening due to WebRTC error for ${connectionId}`);
-        this.stopListening(connectionId);
+        logger.info(`Producer stored but waiting for start-listening command for ${peerId}`);
       }
     });
   }
@@ -163,54 +139,6 @@ export class VoiceService extends EventEmitter {
     }
     this.sessions.delete(connectionId);
     logger.info(`Deleted voice session for ${connectionId}`);
-  }
-
-  /**
-   * Handle client messages related to voice service
-   */
-  private handleClientMessage(connectionId: string, message: any): void {
-    logger.info(`Processing client message type: ${message.type} from ${connectionId}`);
-    
-    // Check if we have a session first
-    if (!this.sessions.has(connectionId)) {
-      logger.warn(`Received ${message.type} for non-existent session ${connectionId}, creating new session`);
-      this.createSession(connectionId);
-    }
-    
-    const session = this.sessions.get(connectionId);
-    if (!session) return;
-    
-    switch (message.type) {
-      case 'start-listening':
-        logger.info(`Start-listening request received with command ID: ${message.commandId || 'none'}`);
-        
-        // Store the command ID for response tracking
-        const commandId = message.commandId || Date.now().toString(36);
-        
-        // Check if already listening
-        if (session.isListening) {
-          logger.warn(`Session ${connectionId} is already listening, resetting state`);
-          this.stopListening(connectionId);
-        }
-        
-        // Start listening
-        const started = this.startListening(connectionId);
-        
-        this.webrtcService.sendMessage(connectionId, { 
-          type: 'listening-started',
-          commandId: commandId,
-          error: started ? undefined : 'Failed to start listening'
-        });
-        break;
-        
-      case 'stop-listening':
-        this.stopListening(connectionId);
-        break;
-        
-      default:
-        logger.debug(`Unhandled message type: ${message.type} from ${connectionId}`);
-        break;
-    }
   }
 
   /**
@@ -282,8 +210,8 @@ export class VoiceService extends EventEmitter {
       return true;
     }
 
-    if (!this.webrtcService.isConnected(connectionId)) {
-      logger.warn(`Cannot start listening: WebRTC not connected for ${connectionId}`);
+    if (!this.mediasoupService.isConnected(connectionId)) {
+      logger.warn(`Cannot start listening: mediasoup not connected for ${connectionId}`);
       return false;
     }
     
@@ -320,6 +248,6 @@ export class VoiceService extends EventEmitter {
       session.deepgramConnection = undefined;
     }
 
-    this.webrtcService.sendMessage(connectionId, { type: 'listening-stopped' });
+    this.mediasoupService.sendNotificationById(connectionId, 'listening-stopped');
   }
 }

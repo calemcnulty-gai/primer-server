@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { VoiceService } from '../services/VoiceService';
-import { WebRTCService } from '../services/WebRTCService';
+import { MediasoupService } from '../services/MediasoupService';
 
 export interface VoiceControllerInterface {
   getStatus: (req: Request, res: Response) => void;
@@ -10,17 +10,16 @@ export interface VoiceControllerInterface {
 
 export class VoiceController implements VoiceControllerInterface {
   private voiceService: VoiceService;
-  private webrtcService: WebRTCService;
+  private mediasoupService: MediasoupService;
 
-  constructor(voiceService: VoiceService, webrtcService?: WebRTCService) {
+  constructor(voiceService: VoiceService, mediasoupService?: MediasoupService) {
     this.voiceService = voiceService;
     
-    // Get the WebRTC service either from the parameter or from the import
-    // This ensures backward compatibility
-    this.webrtcService = webrtcService || (voiceService as any).webrtcService;
+    // Get the MediasoupService either from the parameter or from the import
+    this.mediasoupService = mediasoupService || (voiceService as any).mediasoupService;
     
-    if (!this.webrtcService) {
-      throw new Error('WebRTCService is required but not available');
+    if (!this.mediasoupService) {
+      throw new Error('MediasoupService is required but not available');
     }
     
     this.getStatus = this.getStatus.bind(this);
@@ -40,7 +39,7 @@ export class VoiceController implements VoiceControllerInterface {
    * Get WebRTC connection configuration
    */
   public getConfig(req: Request, res: Response): void {
-    const config = this.webrtcService.getRTCConfig();
+    const config = this.mediasoupService.getRTCConfig();
     res.json(config);
   }
 
@@ -48,6 +47,6 @@ export class VoiceController implements VoiceControllerInterface {
    * Handle a new WebSocket connection for voice
    */
   public handleWebSocketConnection(connectionId: string, ws: any): void {
-    this.webrtcService.handleNewConnection(connectionId, ws);
+    this.mediasoupService.handleConnection(connectionId, ws);
   }
 }

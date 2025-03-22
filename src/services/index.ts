@@ -1,4 +1,3 @@
-import { WebRTCService } from './WebRTCService';
 import { VoiceService } from './VoiceService';
 import { DeepgramService } from './DeepgramService';
 import { GeminiService } from './GeminiService';
@@ -16,24 +15,21 @@ const logger = createLogger('Services');
 export function initializeServices() {
   logger.info('Initializing services...');
   
-  // Initialize WebRTC service first (no dependencies)
-  const webrtcService = new WebRTCService();
+  // Initialize MediasoupService first (no dependencies)
+  const mediasoupService = new MediasoupService();
   
-  // Initialize Voice service with WebRTC dependency
-  const voiceService = new VoiceService(webrtcService);
+  // Initialize Voice service with MediasoupService dependency
+  const voiceService = new VoiceService(mediasoupService);
   
   // Export other services directly for potential direct usage
   return {
-    webrtc: webrtcService,
+    mediasoup: mediasoupService,
     voice: voiceService,
     deepgram: new DeepgramService(),
     gemini: new GeminiService(),
     cartesia: new CartesiaService()
   };
 }
-
-// Type definition for the services object
-export type Services = ReturnType<typeof initializeServices>;
 
 /**
  * Set up WebSocket server with the services
@@ -68,8 +64,8 @@ export function setupWebSocketServer(server: any, path: string = '/api/v1/voice'
   return wss;
 }
 
-// Export all services directly
-export { WebRTCService } from './WebRTCService';
+// Export services
+export { MediasoupService } from './MediasoupService';
 export { VoiceService } from './VoiceService';
 export { DeepgramService } from './DeepgramService';
 export { GeminiService } from './GeminiService';

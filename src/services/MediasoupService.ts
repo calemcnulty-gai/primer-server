@@ -348,4 +348,18 @@ export class MediasoupService extends EventEmitter {
   public getStatus(): string {
     return this.status;
   }
+
+  public isConnected(peerId: string): boolean {
+    const peer = this.peers.get(peerId);
+    return !!peer && peer.transports.size > 0 && Array.from(peer.transports.values()).some(t => 
+      t.dtlsState === 'connected' && t.iceState === 'completed'
+    );
+  }
+
+  public sendNotificationById(peerId: string, method: string, data?: any): void {
+    const peer = this.peers.get(peerId);
+    if (peer) {
+      this.sendNotification(peer, method, data);
+    }
+  }
 }
