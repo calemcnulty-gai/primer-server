@@ -205,14 +205,24 @@ export class MediasoupService extends EventEmitter {
       initialAvailableOutgoingBitrate: 800000,
     });
 
+    logger.info(`Transport created with details:`, {
+      id: transport.id,
+      iceParameters: transport.iceParameters,
+      iceCandidates: transport.iceCandidates,
+      dtlsParameters: transport.dtlsParameters,
+      sctpParameters: transport.sctpParameters
+    });
+
     peer.transports.set(transport.id, transport);
 
-    transport.on('dtlsstatechange', (state) =>
+    transport.on('dtlsstatechange', (state) => {
+      logger.info(`Transport ${transport.id} DTLS state changed to ${state}`);
       logger.debug(`Transport ${transport.id} DTLS state: ${state}`)
-    );
-    transport.on('icestatechange', (state) =>
+    });
+    transport.on('icestatechange', (state) => {
+      logger.info(`Transport ${transport.id} ICE state changed to ${state}`);
       logger.debug(`Transport ${transport.id} ICE state: ${state}`)
-    );
+    });
     transport.on('@close', () => {
       logger.info(`Transport ${transport.id} closed`);
       peer.transports.delete(transport.id);
