@@ -1,22 +1,23 @@
+import { EventEmitter } from 'events';
 import { VoiceService } from '../VoiceService';
-import { WebRTCService } from '../WebRTCService'; 
+import { MediasoupService } from '../MediasoupService';
+import { jest } from '@jest/globals';
 
 describe('VoiceService', () => {
   let voiceService: VoiceService;
-  let webrtcService: WebRTCService;
+  let mediasoupService: jest.Mocked<MediasoupService>;
 
   beforeEach(() => {
-    // Create a mock WebRTC service
-    webrtcService = {
+    // Create a mock MediasoupService
+    mediasoupService = {
       on: jest.fn(),
-      isConnected: jest.fn().mockReturnValue(true),
-      sendMessage: jest.fn(),
-      sendData: jest.fn().mockReturnValue(true),
-      sendError: jest.fn()
-    } as unknown as WebRTCService;
+      isConnected: jest.fn(),
+      sendNotificationById: jest.fn(),
+      handleConnection: jest.fn(),
+      ...new EventEmitter()
+    } as unknown as jest.Mocked<MediasoupService>;
 
-    // Create a new voice service instance with the mock WebRTC service
-    voiceService = new VoiceService(webrtcService);
+    voiceService = new VoiceService(mediasoupService);
   });
 
   describe('getStatus', () => {
@@ -49,44 +50,45 @@ describe('VoiceService', () => {
   });
 
   describe('startListening', () => {
-    it('should start listening to audio', () => {
-      // Create a session first
-      (voiceService as any).createSession('test-connection');
-      
-      // Call the method
-      voiceService.startListening('test-connection');
-      
-      // Verify the session was updated
-      const session = (voiceService as any).sessions.get('test-connection');
-      expect(session.isListening).toBe(true);
-      
-      // Verify WebRTC message was sent
-      expect(webrtcService.sendMessage).toHaveBeenCalledWith(
-        'test-connection', 
-        { type: 'listening-started' }
-      );
+    it('should return false if no session exists', () => {
+      const result = voiceService.startListening('nonexistent');
+      expect(result).toBe(false);
     });
-    
-    it('should not start if WebRTC is not connected', () => {
-      // Mock WebRTC as disconnected
-      (webrtcService.isConnected as jest.Mock).mockReturnValueOnce(false);
-      
+
+    it('should return false if mediasoup is not connected', () => {
       // Create a session first
-      (voiceService as any).createSession('test-connection');
-      
-      // Call the method
-      voiceService.startListening('test-connection');
-      
-      // Verify the session was not updated
-      const session = (voiceService as any).sessions.get('test-connection');
-      expect(session.isListening).toBe(false);
-      
-      // Verify error was sent
-      expect(webrtcService.sendError).toHaveBeenCalledWith(
-        'test-connection',
-        'WEBRTC_NOT_CONNECTED',
-        expect.any(String)
-      );
+      voiceService['createSession']('test');
+      mediasoupService.isConnected.mockReturnValue(false);
+
+      const result = voiceService.startListening('test');
+      expect(result).toBe(false);
+      expect(mediasoupService.isConnected).toHaveBeenCalledWith('test');
+    });
+
+    it('should start listening if session exists and mediasoup is connected', () => {
+      // Create a session first
+      voiceService['createSession']('test');
+      mediasoupService.isConnected.mockReturnValue(true);
+
+      const result = voiceService.startListening('test');
+      expect(result).toBe(true);
+    });
+  });
+
+  describe('stopListening', () => {
+    it('should do nothing if no session exists', () => {
+      voiceService.stopListening('nonexistent');
+      expect(mediasoupService.sendNotificationById).not.toHaveBeenCalled();
+    });
+
+    it('should stop listening and send notification', () => {
+      // Create and start a session first
+      voiceService['createSession']('test');
+      mediasoupService.isConnected.mockReturnValue(true);
+      voiceService.startListening('test');
+
+      voiceService.stopListening('test');
+      expect(mediasoupService.sendNotificationById).toHaveBeenCalledWith('test', 'listening-stopped');
     });
   });
 });

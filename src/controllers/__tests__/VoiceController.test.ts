@@ -1,82 +1,71 @@
 import { Request, Response } from 'express';
 import { VoiceController } from '../voiceController';
 import { VoiceService } from '../../services/VoiceService';
-import { WebRTCService } from '../../services/WebRTCService';
+import { MediasoupService } from '../../services/MediasoupService';
+import { jest } from '@jest/globals';
+import { WebSocket } from 'ws';
 
 describe('VoiceController', () => {
   let voiceController: VoiceController;
   let voiceService: jest.Mocked<VoiceService>;
-  let webrtcService: jest.Mocked<WebRTCService>;
-  let mockRequest: Partial<Request>;
-  let mockResponse: Partial<Response>;
-  let responseJson: jest.Mock;
+  let mediasoupService: jest.Mocked<MediasoupService>;
+  let mockReq: Partial<Request>;
+  let mockRes: Partial<Response>;
 
   beforeEach(() => {
-    // Create mock request and response
-    mockRequest = {};
-    responseJson = jest.fn();
-    mockResponse = {
-      json: responseJson,
-    };
-
     // Create mock services
     voiceService = {
-      getStatus: jest.fn().mockReturnValue('running'),
+      startListening: jest.fn(),
+      stopListening: jest.fn(),
     } as unknown as jest.Mocked<VoiceService>;
-    
-    webrtcService = {
-      getRTCConfig: jest.fn().mockReturnValue({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-      }),
-      handleNewConnection: jest.fn(),
-    } as unknown as jest.Mocked<WebRTCService>;
 
-    // Create the controller with the mock services
-    voiceController = new VoiceController(voiceService, webrtcService);
-  });
+    mediasoupService = {
+      handleConnection: jest.fn(),
+    } as unknown as jest.Mocked<MediasoupService>;
 
-  describe('getStatus', () => {
-    it('should return the voice service status', () => {
-      // Call the method
-      voiceController.getStatus(mockRequest as Request, mockResponse as Response);
+    // Create mock request and response
+    mockReq = {};
+    const mockResponse = {
+      json: jest.fn().mockReturnThis(),
+      status: jest.fn().mockReturnThis(),
+      send: jest.fn().mockReturnThis(),
+    };
+    mockRes = mockResponse as unknown as Partial<Response>;
 
-      // Verify the service method was called
-      expect(voiceService.getStatus).toHaveBeenCalled();
-
-      // Verify the response was sent
-      expect(responseJson).toHaveBeenCalledWith({
-        status: 'running',
-        ready: true
-      });
-    });
+    voiceController = new VoiceController(voiceService, mediasoupService);
   });
 
   describe('getConfig', () => {
-    it('should return the WebRTC configuration', () => {
-      // Call the method
-      voiceController.getConfig(mockRequest as Request, mockResponse as Response);
-
-      // Verify the service method was called
-      expect(webrtcService.getRTCConfig).toHaveBeenCalled();
-
-      // Verify the response was sent
-      expect(responseJson).toHaveBeenCalledWith({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    it('should return WebRTC configuration', async () => {
+      await voiceController.getConfig(mockReq as Request, mockRes as Response);
+      expect(mockRes.json).toHaveBeenCalledWith({
+        config: {
+          iceServers: []
+        }
       });
     });
   });
 
   describe('handleWebSocketConnection', () => {
-    it('should handle a new WebSocket connection', () => {
-      // Mock WebSocket
-      const mockWs = {};
-      const connectionId = 'test-connection-id';
+    it('should handle new WebSocket connection', async () => {
+      const mockWs = {} as WebSocket;
+      const connectionId = 'test-connection';
 
-      // Call the method
-      voiceController.handleWebSocketConnection(connectionId, mockWs);
+      await voiceController.handleWebSocketConnection(connectionId, mockWs);
+      expect(mediasoupService.handleConnection).toHaveBeenCalledWith(connectionId, mockWs);
+    });
 
-      // Verify the service method was called with the connection ID and WebSocket
-      expect(webrtcService.handleNewConnection).toHaveBeenCalledWith(connectionId, mockWs);
+    it('should handle connection errors', async () => {
+      const mockWs = {
+        close: jest.fn()
+      } as unknown as WebSocket;
+      const connectionId = 'test-connection';
+
+      const error = new Error('Connection failed');
+      mediasoupService.handleConnection.mockRejectedValue(error);
+
+      await voiceController.handleWebSocketConnection(connectionId, mockWs);
+      expect(mockWs.close).toHaveBeenCalled();
     });
   });
 });
