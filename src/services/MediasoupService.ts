@@ -193,7 +193,12 @@ export class MediasoupService extends EventEmitter {
     logger.info(`Creating WebRTC transport for ${peer.id}`);
 
     const transport = await peer.router.createWebRtcTransport({
-      listenIps: [{ ip: '10.1.111.119', announcedIp: '44.218.104.132' }], // TODO: Make configurable
+      listenIps: [
+        {
+          ip: '0.0.0.0',  // Bind to all interfaces
+          announcedIp: '44.218.104.132'  // Public IP to announce
+        }
+      ],
       enableUdp: true,
       enableTcp: true,
       preferUdp: true,
